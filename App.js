@@ -3,16 +3,23 @@
 // Built to learn React Native with Expo. Two screens, an entry screen where the
 // vendor records money in or money out, and a dashboard showing today's totals.
 // Records are saved with AsyncStorage so they survive closing the app.
+// Vendors log in with Supabase first, and each vendor's records are kept
+// separately on the phone under their own user id.
 
 import { useState, useEffect } from "react";
 import {
   StyleSheet, Text, View, TextInput, TouchableOpacity,
-  FlatList, Alert, SafeAreaView,
+  FlatList, Alert, SafeAreaView, ActivityIndicator,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { supabase } from "./lib/supabase";
+import AuthScreen from "./AuthScreen";
 
-// The key under which all records are stored on the phone
-const STORAGE_KEY = "tindahan_records";
+// Each vendor's records are stored under their own key on the phone,
+// so two vendors sharing one phone never see each other's records
+function storageKey(userId) {
+  return "tindahan_records_" + userId;
+}
 
 // Format a number as Philippine pesos, for example 1250 becomes P 1,250.00
 function pesos(amount) {
@@ -27,7 +34,41 @@ function todayString() {
   return new Date().toISOString().slice(0, 10);
 }
 
+// The top of the app, shows a loading screen, then login, then the tracker
 export default function App() {
+  const [session, setSession] = useState(null);
+  const [checking, setChecking] = useState(true);
+
+  // Find out if a vendor is already logged in, then listen for login and logout
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session);
+      setChecking(false);
+    });
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, newSession) => {
+      setSession(newSession);
+    });
+    return () => listener.subscription.unsubscribe();
+  }, []);
+
+  if (checking) {
+    return (
+      <View style={styles.center}>
+        <ActivityIndicator size="large" color="#2d5016" />
+      </View>
+    );
+  }
+  if (!session) {
+    return <AuthScreen />;
+  }
+  return <Tracker key={session.user.id} user={session.user} />;
+}
+
+// The money tracker itself, shown only to a logged in vendor
+function Tracker({ user }) {
+  const STORAGE_KEY = storageKey(user.id);
+  const username = user.user_metadata?.username || user.email;
+
   // which screen is visible, "entry" or "dashboard"
   const [screen, setScreen] = useState("entry");
   // the list of all saved records
@@ -109,11 +150,20 @@ export default function App() {
     .reduce((sum, r) => sum + r.amount, 0);
   const net = moneyIn - moneyOut;
 
+  // Log out, the session listener in App switches back to the login screen
+  function logout() {
+    Alert.alert("Log out?", "Your records stay saved on this phone.", [
+      { text: "Cancel" },
+      { text: "Log out", onPress: () => supabase.auth.signOut() },
+    ]);
+  }
+
   // ----- the entry screen -----
   function renderEntry() {
     return (
       <View style={styles.body}>
         <Text style={styles.title}>Tindahan</Text>
+        <Text style={styles.label}>Kumusta, {username}</Text>
         <Text style={styles.label}>Ilagay ang halaga, enter the amount</Text>
         <TextInput
           style={styles.input}
@@ -187,6 +237,9 @@ export default function App() {
             <Text style={styles.label}>Wala pang record ngayong araw.</Text>
           }
         />
+        <TouchableOpacity style={styles.logoutButton} onPress={logout}>
+          <Text style={styles.logoutText}>LOG OUT</Text>
+        </TouchableOpacity>
       </View>
     );
   }
@@ -199,13 +252,13 @@ export default function App() {
           style={[styles.navButton, screen === "entry" && styles.navActive]}
           onPress={() => setScreen("entry")}
         >
-          <Text style={styles.navText}>ENTRY</Text>
+          <Text style={[styles.navText, screen === "entry" && styles.navTextActive]}>ENTRY</Text>
         </TouchableOpacity>
         <TouchableOpacity
           style={[styles.navButton, screen === "dashboard" && styles.navActive]}
           onPress={() => setScreen("dashboard")}
         >
-          <Text style={styles.navText}>DASHBOARD</Text>
+          <Text style={[styles.navText, screen === "dashboard" && styles.navTextActive]}>DASHBOARD</Text>
         </TouchableOpacity>
       </View>
     </SafeAreaView>
@@ -251,4 +304,11 @@ const styles = StyleSheet.create({
   navButton: { flex: 1, padding: 18, alignItems: "center", backgroundColor: "#e8e2d5" },
   navActive: { backgroundColor: "#2d5016" },
   navText: { fontSize: 18, fontWeight: "bold", color: "#333" },
+  navTextActive: { color: "white" },
+  center: { flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#f5f1e8" },
+  logoutButton: {
+    marginTop: 10, padding: 14, borderRadius: 10,
+    borderWidth: 2, borderColor: "#c62828", alignItems: "center",
+  },
+  logoutText: { fontSize: 18, fontWeight: "bold", color: "#c62828" },
 });
