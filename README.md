@@ -8,17 +8,21 @@ vendors only estimate their money each day and do not really know if
 they are profiting, so the app makes recording money simple enough
 for elderly and low literacy users, with large text and big buttons.
 
-The app has two screens. On the entry screen the vendor types an
-amount, a short description, chooses money in or money out, and taps
-save. The dashboard screen shows today's money in, money out, and the
-net, with the list of today's records, and a record can be deleted by
-long pressing it. All records are saved on the phone with
-AsyncStorage, so the data is still there even if the app is closed or
-the phone is turned off. Labels are in Tagalog and English.
+Vendors register with a username, their market name, an email, and a
+PIN, and stay logged in after that. On the entry screen the vendor
+types an amount and a short description, chooses money in or money
+out, and taps save. The dashboard screen shows today's money in,
+money out, and net, with the list of today's records, and a record
+can be deleted by long pressing it. Every record is saved on the phone
+first, so the app works in the market with no signal, and it syncs
+both ways with a cloud database whenever there is internet, so a
+vendor who changes phones gets all their records back after logging
+in. Labels are in Tagalog and English.
 
 My purpose was to learn how React Native structures an app,
-components, state with hooks, styling, handling touch input, and
-persistent local storage on a real Android phone.
+components, state with hooks, styling, handling touch input,
+persistent local storage, user accounts, and offline first syncing
+with a cloud database, all on a real Android phone.
 
 [Software Demo Video](http://youtube.link.goes.here)
 
@@ -30,15 +34,17 @@ physical Android phone through the Expo Go app, with live reload over
 WiFi during development.
 
 The app is written in JavaScript using React Native with Expo. It
-uses React hooks, useState and useEffect, for state, React Native
-components for the interface, and the AsyncStorage package for
-persistent local storage.
+uses React hooks, useState and useEffect, for state, AsyncStorage for
+local storage on the phone, and Supabase for login and a PostgreSQL
+database. Row level security in the database makes sure each vendor
+can only read and write their own records.
 
 # Useful Websites
 
 * [React Native Documentation](https://reactnative.dev/docs/getting-started)
 * [Expo Documentation](https://docs.expo.dev/)
 * [AsyncStorage Documentation](https://react-native-async-storage.github.io/async-storage/docs/usage)
+* [Supabase Documentation](https://supabase.com/docs)
 * [React Hooks Documentation](https://react.dev/reference/react)
 
 # Future Work
@@ -46,4 +52,4 @@ persistent local storage.
 * A history screen showing past days and weekly totals
 * Simple charts of income and expenses over time
 * Categories for expenses like pamasahe, kuryente, and supplies
-* Backup of records to the cloud so a lost phone does not lose data
+* An admin dashboard for the app owner
