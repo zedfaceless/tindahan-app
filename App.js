@@ -29,7 +29,10 @@ import {
   alarmsSupported, alarmsUnavailable, readReminderSettings, saveReminderSettings,
   askPermission, refreshReminders, notifyNow, testReminder,
 } from "./lib/notifications";
-import { buildStatementHtml, statementRecords, periodFor, longDay, PREMIUM_MONTHS } from "./lib/statement";
+import { Ionicons } from "@expo/vector-icons";
+import { buildStatementHtml, statementRecords, periodFor, longDay, earliestStart, PREMIUM_MONTHS, MAX_MONTHS } from "./lib/statement";
+import { parseDay, dayString, addDays } from "./lib/reminders";
+import HistoryScreen from "./HistoryScreen";
 import { savePdf } from "./lib/exportPdf";
 import AuthScreen from "./AuthScreen";
 import ScheduleScreen from "./ScheduleScreen";
@@ -159,6 +162,7 @@ function Tracker({ user }) {
   // premium records waiting on the phone because premium lapsed
   const [heldBack, setHeldBack] = useState(0);
   // the account screen forms
+  const [editFullName, setEditFullName] = useState("");
   const [editUsername, setEditUsername] = useState("");
   const [editMarket, setEditMarket] = useState("");
   const [newPin, setNewPin] = useState("");
@@ -180,6 +184,9 @@ function Tracker({ user }) {
   const [statementRequest, setStatementRequest] = useState(null);
   const [statementScope, setStatementScope] = useState("business");
   const [statementMonths, setStatementMonths] = useState(1);
+  // a premium vendor's own dates, when they choose CUSTOM
+  const [customFrom, setCustomFrom] = useState(todayString());
+  const [customTo, setCustomTo] = useState(todayString());
 
   // Load records and account from the phone, sync, and sync again on return
   useEffect(() => {
@@ -274,6 +281,7 @@ function Tracker({ user }) {
       loadStatementRequest();
     }
     if (next === "account") {
+      setEditFullName((profile && profile.full_name) || "");
       setEditUsername(username);
       setEditMarket((profile && profile.market_name) || "");
       loadRequest();
@@ -457,18 +465,26 @@ function Tracker({ user }) {
       return;
     }
     setBusy(true);
+    let step = "preparing the statement";
     try {
       const html = buildStatementHtml({
-        vendor: { username: username, market: profile && profile.market_name, email: user.email },
+        vendor: {
+          username: username, fullName: profile && profile.full_name,
+          market: profile && profile.market_name, email: user.email,
+        },
         scope: scope, start: start, end: end, records: records,
         confirmedOn: confirmedOn, generatedAt: new Date(),
       });
-      const result = await savePdf(html, "Tindahan statement " + start + " to " + end);
+      step = "making the PDF";
+      const result = await savePdf(html, "Tindahan statement " + start + " to " + end,
+        "Tindahan-statement-" + start + "-to-" + end + ".pdf");
       if (result === "blocked") {
         notify("Allow pop ups", "Your browser blocked the statement window. Allow pop ups for Tindahan and try again.");
+      } else if (result === "saved") {
+        notify("PDF saved", "The statement was made, but this phone cannot open the share menu.");
       }
     } catch (error) {
-      notify("Could not make the PDF", "Please try again.");
+      notify("Could not make the PDF", "Stopped while " + step + ". " + String((error && error.message) || error));
     } finally {
       setBusy(false);
     }
@@ -504,6 +520,11 @@ function Tracker({ user }) {
   async function saveProfile() {
     const cleanUser = editUsername.trim().toLowerCase();
     const cleanMarket = editMarket.trim();
+    const cleanFull = editFullName.trim().replace(/\s+/g, " ");
+    if (cleanFull.length > 0 && cleanFull.length < 2) {
+      notify("Check your full name", "Please type your full name, like Juana Dela Cruz.");
+      return;
+    }
     if (cleanUser.length < 3) {
       notify("Username too short", "Use at least 3 letters.");
       return;
@@ -526,7 +547,7 @@ function Tracker({ user }) {
       }
       const { error } = await supabase
         .from("profiles")
-        .update({ username: cleanUser, market_name: cleanMarket })
+        .update({ username: cleanUser, market_name: cleanMarket, full_name: cleanFull || null })
         .eq("id", user.id);
       if (error) throw error;
       setProfile(await refreshProfile(user.id));
@@ -806,7 +827,31 @@ function Tracker({ user }) {
       </View>
     );
     if (premium) {
-      const period = periodFor(statementMonths, new Date());
+      const custom = statementMonths === "custom";
+      const period = custom ? { start: customFrom, end: customTo } : periodFor(statementMonths, new Date());
+      // custom dates stay within 6 months of each other and never pass today
+      const stepCustom = (which, days, months) => {
+        const base = parseDay(which === "from" ? customFrom : customTo);
+        let d = months
+          ? new Date(base.getFullYear(), base.getMonth() + months, Math.min(base.getDate(),
+              new Date(base.getFullYear(), base.getMonth() + months + 1, 0).getDate()))
+          : addDays(base, days);
+        let key = dayString(d);
+        if (which === "from") {
+          const low = earliestStart(customTo, MAX_MONTHS);
+          if (key < low) key = low;
+          if (key > customTo) key = customTo;
+          setCustomFrom(key);
+        } else {
+          const today = todayString();
+          if (key > today) key = today;
+          if (key < customFrom) key = customFrom;
+          setCustomTo(key);
+          // moving the end keeps the range at 6 months or less
+          const low = earliestStart(key, MAX_MONTHS);
+          if (customFrom < low) setCustomFrom(low);
+        }
+      };
       return (
         <View style={styles.statementCard}>
           {heading}
@@ -822,18 +867,32 @@ function Tracker({ user }) {
             ))}
           </View>
           <View style={styles.statementRow}>
-            {PREMIUM_MONTHS.map((m) => (
+            {[...PREMIUM_MONTHS, "custom"].map((m) => (
               <TouchableOpacity
                 key={m}
                 style={[styles.statementChip, statementMonths === m && styles.statementChipActive]}
                 onPress={() => setStatementMonths(m)}
               >
                 <Text style={[styles.statementChipText, statementMonths === m && styles.statementChipTextActive]}>
-                  {m === 1 ? "1 MONTH" : m + " MONTHS"}
+                  {m === "custom" ? "CUSTOM" : m === 1 ? "1 MONTH" : m + " MONTHS"}
                 </Text>
               </TouchableOpacity>
             ))}
           </View>
+          {custom && [["from", "From", customFrom], ["to", "To", customTo]].map(([which, label, value]) => (
+            <View key={which} style={styles.customBlock}>
+              <Text style={styles.customLabel}>{label}</Text>
+              <Text style={styles.customValue}>{longDay(value)}</Text>
+              <View style={styles.statementRow}>
+                {[["- 1 month", 0, -1], ["- 1 day", -1, 0], ["+ 1 day", 1, 0], ["+ 1 month", 0, 1]].map(([text, d, mo]) => (
+                  <TouchableOpacity key={text} style={styles.customStep} onPress={() => stepCustom(which, d, mo)}>
+                    <Text style={styles.customStepText}>{text}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+          ))}
+          {custom && <Text style={styles.statementNote}>Up to 6 months per statement.</Text>}
           <Text style={styles.statementPeriod}>{longDay(period.start)} to {longDay(period.end)}</Text>
           <TouchableOpacity
             style={styles.statementButton}
@@ -1055,6 +1114,19 @@ function Tracker({ user }) {
     );
   }
 
+  function renderHistory() {
+    return (
+      <ScrollView contentContainerStyle={styles.body}>
+        <HistoryScreen
+          records={records}
+          premium={premium}
+          header={renderHeader("History")}
+          onUpgrade={() => openScreen("account")}
+        />
+      </ScrollView>
+    );
+  }
+
   function renderReminderCard() {
     if (!alarmsSupported) {
       return (
@@ -1121,6 +1193,17 @@ function Tracker({ user }) {
 
         <View style={styles.card}>
           <Text style={styles.cardTitle}>Profile</Text>
+          <Text style={styles.label}>Buong pangalan, full name</Text>
+          <TextInput
+            placeholderTextColor={colors.muted}
+            keyboardAppearance={theme === "abyss" ? "dark" : "light"}
+            style={styles.input}
+            value={editFullName}
+            onChangeText={setEditFullName}
+            autoCapitalize="words"
+            placeholder="halimbawa, Juana Dela Cruz"
+          />
+          <Text style={styles.fieldHint}>Shown on your income statements.</Text>
           <Text style={styles.label}>Username</Text>
           <TextInput
             placeholderTextColor={colors.muted}
@@ -1178,17 +1261,26 @@ function Tracker({ user }) {
         <View style={styles.screen}>
           {screen === "entry" && renderEntry()}
           {screen === "dashboard" && renderDashboard()}
+          {screen === "history" && renderHistory()}
           {screen === "schedule" && renderSchedule()}
           {screen === "account" && renderAccount()}
         </View>
         <View style={styles.nav}>
-          {[["entry", "ENTRY"], ["dashboard", "TODAY"], ["schedule", "SCHEDULE"], ["account", "ACCOUNT"]].map(([key, label]) => (
+          {[
+            ["entry", "ENTRY", "create-outline"],
+            ["dashboard", "TODAY", "today-outline"],
+            ["history", "HISTORY", "bar-chart-outline"],
+            ["schedule", "SCHEDULE", "alarm-outline"],
+            ["account", "ACCOUNT", "person-circle-outline"],
+          ].map(([key, label, icon]) => (
             <TouchableOpacity
               key={key}
               style={[styles.navButton, screen === key && styles.navActive]}
               onPress={() => openScreen(key)}
+              accessibilityLabel={label}
             >
-              <Text style={[styles.navText, screen === key && styles.navTextActive]}>{label}</Text>
+              <Ionicons name={icon} size={24} color={screen === key ? colors.onStrong : colors.muted} />
+              <Text style={[styles.navText, screen === key && styles.navTextActive]} numberOfLines={1}>{label}</Text>
             </TouchableOpacity>
           ))}
         </View>
@@ -1309,6 +1401,12 @@ function makeStyles(c) {
   statementButtonText: { fontSize: 16, fontWeight: "bold", color: "white" },
   statementLink: { fontSize: 15, color: c.accent, fontWeight: "bold", textAlign: "center", marginTop: 12 },
   statementNote: { fontSize: 14, color: c.muted, marginTop: 10 },
+  customBlock: { marginTop: 12 },
+  customLabel: { fontSize: 14, color: c.muted },
+  customValue: { fontSize: 18, fontWeight: "bold", color: c.text },
+  customStep: { flex: 1, paddingVertical: 9, borderRadius: 8, backgroundColor: c.subtle, alignItems: "center" },
+  customStepText: { fontSize: 12, fontWeight: "bold", color: c.text },
+  fieldHint: { fontSize: 13, color: c.muted, marginTop: 4 },
   statementWait: { fontSize: 15, color: c.accent, marginTop: 12, backgroundColor: c.accentSoft, padding: 12, borderRadius: 8 },
   statementReady: { fontSize: 15, color: c.good, marginTop: 12, backgroundColor: c.goodSoft, padding: 12, borderRadius: 8, fontWeight: "bold" },
   statementRejected: { fontSize: 15, color: c.bad, marginTop: 12, backgroundColor: c.badSoft, padding: 12, borderRadius: 8 },
@@ -1386,9 +1484,9 @@ function makeStyles(c) {
   logoutText: { fontSize: 18, fontWeight: "bold", color: c.bad },
 
   nav: { flexDirection: "row", borderTopWidth: 1, borderColor: c.line, backgroundColor: c.card },
-  navButton: { flex: 1, paddingVertical: 16, alignItems: "center" },
+  navButton: { flex: 1, paddingVertical: 8, alignItems: "center", gap: 2 },
   navActive: { backgroundColor: c.strong },
-  navText: { fontSize: 13, fontWeight: "bold", color: c.muted },
+  navText: { fontSize: 11, fontWeight: "bold", color: c.muted },
   navTextActive: { color: c.onStrong },
 
   // reminder settings
