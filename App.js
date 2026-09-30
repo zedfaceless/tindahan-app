@@ -2,7 +2,8 @@
 // Tindahan, a money tracker for public market vendors.
 // Built to learn React Native with Expo. Three screens, Entry to record money,
 // Dashboard for today's totals in Business, Personal, and Withdrawal tabs, and
-// Account to edit the profile, change the PIN, and get premium.
+// Schedule for premium bill reminders, and Account to edit the profile,
+// change the PIN, set reminders, and get premium.
 // Records are saved on the phone first so the app works with no signal, then
 // synced both ways with Supabase whenever there is internet.
 // The same code also runs in a PC web browser through Expo for web.
@@ -17,11 +18,17 @@ import {
 } from "react-native";
 import { supabase } from "./lib/supabase";
 import { notify, confirmAction } from "./lib/notify";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   readLocal, updateLocal, syncRecords, newId, nowIso,
-  readProfile, refreshProfile, isPremium, PREMIUM_KINDS,
+  readProfile, refreshProfile, isPremium, PREMIUM_KINDS, readSchedules,
 } from "./lib/sync";
+import {
+  alarmsSupported, alarmsUnavailable, readReminderSettings, saveReminderSettings,
+  askPermission, refreshReminders, notifyNow, testReminder,
+} from "./lib/notifications";
 import AuthScreen from "./AuthScreen";
+import ScheduleScreen from "./ScheduleScreen";
 
 // The color palette, shared by every screen
 const SLATE = "#1E293B";      // text, active navigation, structure
@@ -148,13 +155,21 @@ function Tracker({ user }) {
   const [payment, setPayment] = useState(null);
   const [plan, setPlan] = useState("monthly");
   const [reference, setReference] = useState("");
+  // premium schedules, reminder settings, and how many alarms are set
+  const [schedules, setSchedules] = useState([]);
+  const [reminderSettings, setReminderSettings] = useState({ enabled: true, sound: true });
+  const [alarmStatus, setAlarmStatus] = useState(null);
+  // shown once when the owner approves a premium payment
+  const [welcome, setWelcome] = useState(false);
 
   // Load records and account from the phone, sync, and sync again on return
   useEffect(() => {
-    Promise.all([readLocal(user.id), readProfile(user.id)])
-      .then(([savedRecords, savedProfile]) => {
+    Promise.all([readLocal(user.id), readProfile(user.id), readSchedules(user.id)])
+      .then(([savedRecords, savedProfile, savedSchedules]) => {
         setRecords(savedRecords);
         setProfile(savedProfile);
+        setSchedules(savedSchedules);
+        resetAlarms(savedSchedules, savedProfile);
       })
       .catch(() => notify("Storage problem", "Could not load saved records."))
       .finally(runSync);
@@ -173,13 +188,47 @@ function Tracker({ user }) {
       const result = await syncRecords(user.id);
       if (result !== null) {
         setRecords(result.records);
+        setSchedules(result.schedules);
         setProfile(result.profile);
         setHeldBack(result.heldBack);
         setSyncStatus(result.profile.disabled ? "disabled" : "synced");
+        resetAlarms(result.schedules, result.profile);
+        checkWelcome(result.profile);
       }
     } catch (error) {
       setSyncStatus("offline");
     }
+  }
+
+  // Set the phone alarms again from the latest schedules and premium status
+  async function resetAlarms(list, prof) {
+    try {
+      const status = await refreshReminders({
+        userId: user.id, schedules: list, profile: prof, premium: isPremium(prof),
+      });
+      setAlarmStatus(status);
+    } catch (error) {
+      setAlarmStatus({ count: 0, reason: "error" });
+    }
+  }
+
+  // After a schedule is added, paid, or deleted, set the alarms from the phone's
+  // own copy right away, so it works offline, then sync when there is internet
+  async function afterScheduleChange() {
+    resetAlarms(await readSchedules(user.id), profile);
+    runSync();
+  }
+
+  // After the owner approves a payment, welcome the vendor to premium once
+  async function checkWelcome(prof) {
+    if (!prof || !prof.premium_until || new Date(prof.premium_until) <= new Date()) return;
+    if (prof.role === "owner" && prof.owner_premium) return;
+    const key = "tindahan_welcomed_" + user.id;
+    const seen = await AsyncStorage.getItem(key);
+    if (seen !== null && new Date(seen) >= new Date(prof.premium_until)) return;
+    await AsyncStorage.setItem(key, prof.premium_until);
+    setWelcome(true);
+    notifyNow("Welcome to Tindahan Premium", "Your payment is approved. Salamat, enjoy your new features.");
   }
 
   const premium = isPremium(profile);
@@ -206,6 +255,7 @@ function Tracker({ user }) {
       setEditMarket((profile && profile.market_name) || "");
       loadRequest();
       loadPayment();
+      readReminderSettings(user.id).then(setReminderSettings);
     }
   }
 
@@ -447,6 +497,38 @@ function Tracker({ user }) {
         setRequest(null);
       }
     );
+  }
+
+  // Turn reminders or their sound on and off, then set the alarms again
+  async function changeReminders(field) {
+    const next = { ...reminderSettings, [field]: !reminderSettings[field] };
+    if (field === "enabled" && next.enabled) {
+      const allowed = await askPermission();
+      if (!allowed) {
+        notify("Notifications are off", "Allow notifications for Tindahan in your phone settings to get reminders.");
+      }
+    }
+    await saveReminderSettings(user.id, next);
+    setReminderSettings(next);
+    resetAlarms(schedules, profile);
+  }
+
+  // Send a test reminder in 5 seconds
+  async function sendTest() {
+    const sent = await testReminder(user.id);
+    notify(sent ? "Test sent" : "Notifications are off",
+      sent ? "A test reminder will appear in 5 seconds."
+        : "Allow notifications for Tindahan in your phone settings to get reminders.");
+    resetAlarms(schedules, profile);
+  }
+
+  // What the reminder settings card says about the alarms
+  function alarmLabel() {
+    if (!alarmStatus) return "Checking reminders...";
+    if (alarmStatus.reason === "off") return "Reminders are off.";
+    if (alarmStatus.reason === "permission") return "Notifications are blocked. Turn them on in your phone settings.";
+    if (alarmStatus.reason === "error") return "Could not set reminders. Close and open the app again.";
+    return alarmStatus.count + (alarmStatus.count === 1 ? " reminder" : " reminders") + " set for the next 30 days.";
   }
 
   // Log out, the session listener in App switches back to the login screen
@@ -725,12 +807,86 @@ function Tracker({ user }) {
     );
   }
 
+  function renderSchedule() {
+    return (
+      <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
+        <ScheduleScreen
+          user={user}
+          schedules={schedules}
+          onSchedules={setSchedules}
+          onRecords={setRecords}
+          afterChange={afterScheduleChange}
+          premium={premium}
+          header={renderHeader("Schedule")}
+          upgrade={renderUpgradeCard("Never miss a bill. Get reminded before kuryente, rent, and suppliers are due.")}
+        />
+      </ScrollView>
+    );
+  }
+
+  function renderReminderCard() {
+    if (!alarmsSupported) {
+      return (
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>Reminders</Text>
+          <Text style={styles.cardText}>
+            {alarmsUnavailable === "expo-go"
+              ? "Reminder alarms need the installed Tindahan app. They are turned off while testing in Expo Go."
+              : "Reminder alarms ring on your phone. Open Tindahan on your phone to set them."}
+          </Text>
+        </View>
+      );
+    }
+    return (
+      <View style={styles.card}>
+        <Text style={styles.cardTitle}>Reminders</Text>
+        {[["enabled", "Remind me about schedules"], ["sound", "Play a sound"]].map(([field, label]) => (
+          <TouchableOpacity key={field} style={styles.toggleRow} onPress={() => changeReminders(field)}>
+            <Text style={styles.toggleLabel}>{label}</Text>
+            <View style={[styles.toggle, reminderSettings[field] && styles.toggleOn]}>
+              <View style={[styles.knob, reminderSettings[field] && styles.knobOn]} />
+            </View>
+          </TouchableOpacity>
+        ))}
+        <Text style={styles.hint}>{alarmLabel()}</Text>
+        <TouchableOpacity style={styles.outlineButton} onPress={sendTest}>
+          <Text style={styles.outlineButtonText}>SEND A TEST REMINDER</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
+  function renderWelcome() {
+    return (
+      <View style={styles.welcomeOverlay}>
+        <View style={styles.welcomeCard}>
+          <Text style={styles.welcomeTag}>PREMIUM</Text>
+          <Text style={styles.welcomeTitle}>Welcome to Tindahan Premium</Text>
+          <Text style={styles.welcomeText}>
+            Your payment is approved, salamat. You now have premium until {shortDate(profile.premium_until)}.
+          </Text>
+          {["Withdrawals and personal expenses", "Schedules with reminders for your bills", "What is really left after the household share"].map((b) => (
+            <Text key={b} style={styles.welcomeBenefit}>{"\u2713  "}{b}</Text>
+          ))}
+          <TouchableOpacity style={styles.welcomeButton} onPress={() => { setWelcome(false); openScreen("schedule"); }}>
+            <Text style={styles.welcomeButtonText}>SET UP MY FIRST SCHEDULE</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => setWelcome(false)}>
+            <Text style={styles.welcomeLater}>Later</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  }
+
   function renderAccount() {
     return (
       <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
         {renderHeader("Account")}
 
         {renderPremiumCard()}
+
+        {premium && renderReminderCard()}
 
         <View style={styles.card}>
           <Text style={styles.cardTitle}>Profile</Text>
@@ -773,10 +929,11 @@ function Tracker({ user }) {
         <View style={styles.screen}>
           {screen === "entry" && renderEntry()}
           {screen === "dashboard" && renderDashboard()}
+          {screen === "schedule" && renderSchedule()}
           {screen === "account" && renderAccount()}
         </View>
         <View style={styles.nav}>
-          {[["entry", "ENTRY"], ["dashboard", "DASHBOARD"], ["account", "ACCOUNT"]].map(([key, label]) => (
+          {[["entry", "ENTRY"], ["dashboard", "TODAY"], ["schedule", "SCHEDULE"], ["account", "ACCOUNT"]].map(([key, label]) => (
             <TouchableOpacity
               key={key}
               style={[styles.navButton, screen === key && styles.navActive]}
@@ -787,6 +944,7 @@ function Tracker({ user }) {
           ))}
         </View>
       </SafeAreaView>
+      {welcome && profile && renderWelcome()}
     </View>
   );
 }
@@ -936,6 +1094,40 @@ const styles = StyleSheet.create({
   nav: { flexDirection: "row", borderTopWidth: 1, borderColor: LINE, backgroundColor: CARD },
   navButton: { flex: 1, paddingVertical: 16, alignItems: "center" },
   navActive: { backgroundColor: SLATE },
-  navText: { fontSize: 15, fontWeight: "bold", color: MUTED },
+  navText: { fontSize: 13, fontWeight: "bold", color: MUTED },
   navTextActive: { color: "white" },
+
+  // reminder settings
+  toggleRow: {
+    flexDirection: "row", justifyContent: "space-between", alignItems: "center",
+    paddingVertical: 12, borderBottomWidth: 1, borderColor: LINE,
+  },
+  toggleLabel: { fontSize: 18, color: SLATE, flexShrink: 1 },
+  toggle: { width: 56, height: 32, borderRadius: 16, backgroundColor: LINE, padding: 3 },
+  toggleOn: { backgroundColor: EMERALD },
+  knob: { width: 26, height: 26, borderRadius: 13, backgroundColor: "white" },
+  knobOn: { marginLeft: 24 },
+  outlineButton: {
+    marginTop: 12, padding: 14, borderRadius: 10, alignItems: "center",
+    borderWidth: 2, borderColor: INDIGO,
+  },
+  outlineButtonText: { fontSize: 16, fontWeight: "bold", color: INDIGO },
+
+  // the welcome to premium screen
+  welcomeOverlay: {
+    position: "absolute", top: 0, left: 0, right: 0, bottom: 0,
+    backgroundColor: "rgba(30, 41, 59, 0.85)", justifyContent: "center", padding: 20,
+  },
+  welcomeCard: {
+    backgroundColor: CARD, borderRadius: 16, padding: 24,
+    width: "100%", maxWidth: 480, alignSelf: "center",
+    borderTopWidth: 8, borderTopColor: INDIGO,
+  },
+  welcomeTag: { fontSize: 14, fontWeight: "bold", color: INDIGO, letterSpacing: 2 },
+  welcomeTitle: { fontSize: 28, fontWeight: "bold", color: SLATE, marginTop: 6 },
+  welcomeText: { fontSize: 17, color: SLATE, marginTop: 10, marginBottom: 8 },
+  welcomeBenefit: { fontSize: 16, color: SLATE, marginTop: 6 },
+  welcomeButton: { marginTop: 20, backgroundColor: EMERALD, padding: 16, borderRadius: 10, alignItems: "center" },
+  welcomeButtonText: { fontSize: 17, fontWeight: "bold", color: "white" },
+  welcomeLater: { fontSize: 16, color: MUTED, fontWeight: "bold", textAlign: "center", marginTop: 14 },
 });
