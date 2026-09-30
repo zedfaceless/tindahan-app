@@ -48,6 +48,8 @@ export default function SupportScreen({ user, header, onBack, onChanged }) {
   const [loading, setLoading] = useState(true);
   const [available, setAvailable] = useState(false);
   const [busy, setBusy] = useState(false);
+  // true when tickets could not load, usually no internet, so the list is never shown as empty by mistake
+  const [offline, setOffline] = useState(false);
   // the open ticket and its thread
   const [ticket, setTicket] = useState(null);
   const [messages, setMessages] = useState([]);
@@ -71,6 +73,7 @@ export default function SupportScreen({ user, header, onBack, onChanged }) {
       supabase.rpc("support_available"),
     ]);
     setLoading(false);
+    setOffline(Boolean(list.error));
     if (!list.error) setTickets(list.data);
     setAvailable(Boolean(status.data));
   }
@@ -91,6 +94,7 @@ export default function SupportScreen({ user, header, onBack, onChanged }) {
       .select("id, author_role, body, attachment_path, created_at")
       .eq("ticket_id", id)
       .order("created_at", { ascending: true });
+    setOffline(Boolean(error));
     if (error) return;
     setMessages(data);
     const paths = data.map((m) => m.attachment_path).filter((p) => p && !images[p]);
@@ -259,6 +263,20 @@ export default function SupportScreen({ user, header, onBack, onChanged }) {
     );
   }
 
+  // shown instead of an empty list when the tickets could not load
+  function renderOffline(retry) {
+    return (
+      <View style={styles.offline}>
+        <Text style={styles.offlineText}>
+          Offline, could not load your tickets. Your tickets are safe, check your internet and try again.
+        </Text>
+        <TouchableOpacity style={styles.retry} onPress={retry}>
+          <Text style={styles.retryText}>TRY AGAIN</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
   function renderShotPicker() {
     return (
       <View style={styles.shotRow}>
@@ -287,7 +305,8 @@ export default function SupportScreen({ user, header, onBack, onChanged }) {
         </TouchableOpacity>
         <Text style={styles.section}>My tickets</Text>
         {loading && <ActivityIndicator color={colors.muted} />}
-        {!loading && tickets.length === 0 && (
+        {!loading && offline && renderOffline(loadList)}
+        {!loading && !offline && tickets.length === 0 && (
           <Text style={styles.empty}>Wala pang ticket. If something is wrong, open a ticket and we will help.</Text>
         )}
         {tickets.map((t) => {
@@ -373,6 +392,7 @@ export default function SupportScreen({ user, header, onBack, onChanged }) {
           <View style={styles.ticketBottom}>{statusPill(ticket.status)}</View>
         </View>
         {availability()}
+        {offline && renderOffline(() => loadThread(ticket.id, true))}
         {messages.map((m) => {
           const mine = m.author_role === "vendor";
           const bot = m.author_role === "bot";
@@ -442,6 +462,10 @@ function makeStyles(c) {
     primaryText: { fontSize: 17, fontWeight: "bold", color: "white" },
     section: { fontSize: 19, fontWeight: "bold", color: c.text, marginTop: 20 },
     empty: { fontSize: 16, color: c.muted, marginTop: 14 },
+    offline: { marginTop: 14, backgroundColor: c.badSoft, borderRadius: 10, padding: 14 },
+    offlineText: { fontSize: 15, color: c.bad, fontWeight: "bold" },
+    retry: { marginTop: 10, alignSelf: "flex-start", borderWidth: 2, borderColor: c.bad, borderRadius: 8, paddingVertical: 8, paddingHorizontal: 14 },
+    retryText: { fontSize: 14, fontWeight: "bold", color: c.bad },
     ticket: { backgroundColor: c.card, borderRadius: 12, padding: 14, marginTop: 10, borderWidth: 1, borderColor: c.line },
     ticketTop: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
     ticketNumber: { fontSize: 13, fontWeight: "bold", color: c.muted, letterSpacing: 1 },
