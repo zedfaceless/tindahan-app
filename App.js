@@ -33,6 +33,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { buildStatementHtml, statementRecords, periodFor, longDay, earliestStart, PREMIUM_MONTHS, MAX_MONTHS } from "./lib/statement";
 import { parseDay, dayString, addDays } from "./lib/reminders";
 import HistoryScreen from "./HistoryScreen";
+import SupportScreen from "./SupportScreen";
 import { savePdf } from "./lib/exportPdf";
 import AuthScreen from "./AuthScreen";
 import ScheduleScreen from "./ScheduleScreen";
@@ -187,6 +188,8 @@ function Tracker({ user }) {
   // a premium vendor's own dates, when they choose CUSTOM
   const [customFrom, setCustomFrom] = useState(todayString());
   const [customTo, setCustomTo] = useState(todayString());
+  // support tickets with a reply the vendor has not read yet
+  const [supportUnread, setSupportUnread] = useState(0);
 
   // Load records and account from the phone, sync, and sync again on return
   useEffect(() => {
@@ -221,6 +224,7 @@ function Tracker({ user }) {
         resetAlarms(result.schedules, result.profile);
         checkWelcome(result.profile);
         checkStatement(result.profile);
+        checkSupport();
       }
     } catch (error) {
       setSyncStatus("offline");
@@ -488,6 +492,26 @@ function Tracker({ user }) {
     } finally {
       setBusy(false);
     }
+  }
+
+  // ----- help and support -----
+
+  // Count tickets with an unread reply, and tell the vendor once about a new one
+  async function checkSupport() {
+    const { data, error } = await supabase
+      .from("tickets")
+      .select("id, number, last_staff_message_at, vendor_read_at");
+    if (error || !data) return;
+    const unread = data.filter((t) => t.last_staff_message_at
+      && (!t.vendor_read_at || t.last_staff_message_at > t.vendor_read_at));
+    setSupportUnread(unread.length);
+    if (unread.length === 0) return;
+    const newest = unread.map((t) => t.last_staff_message_at).sort().pop();
+    const key = "tindahan_support_seen_" + user.id;
+    const seen = await AsyncStorage.getItem(key);
+    if (seen !== null && seen >= newest) return;
+    await AsyncStorage.setItem(key, newest);
+    notifyNow("New reply to your ticket", "Open Tindahan, Account, Help and support, to read it.");
   }
 
   // ----- account -----
@@ -1182,12 +1206,41 @@ function Tracker({ user }) {
     );
   }
 
+  function renderSupport() {
+    return (
+      <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
+        <SupportScreen
+          user={user}
+          header={renderHeader("Help")}
+          onBack={() => openScreen("account")}
+          onChanged={checkSupport}
+        />
+      </ScrollView>
+    );
+  }
+
   function renderAccount() {
     return (
       <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
         {renderHeader("Account")}
 
         {renderPremiumCard()}
+
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>Tulong, help and support</Text>
+          <Text style={styles.cardText}>
+            Something wrong, or a question about premium or your statement? Open a ticket,
+            the owner replies within 2 to 24 hours.
+          </Text>
+          {supportUnread > 0 && (
+            <Text style={styles.supportUnread}>
+              {supportUnread} {supportUnread === 1 ? "ticket has" : "tickets have"} a new reply
+            </Text>
+          )}
+          <TouchableOpacity style={styles.outlineButton} onPress={() => openScreen("support")}>
+            <Text style={styles.outlineButtonText}>OPEN HELP AND SUPPORT</Text>
+          </TouchableOpacity>
+        </View>
 
         {premium && renderReminderCard()}
 
@@ -1264,6 +1317,7 @@ function Tracker({ user }) {
           {screen === "history" && renderHistory()}
           {screen === "schedule" && renderSchedule()}
           {screen === "account" && renderAccount()}
+          {screen === "support" && renderSupport()}
         </View>
         <View style={styles.nav}>
           {[
@@ -1275,12 +1329,17 @@ function Tracker({ user }) {
           ].map(([key, label, icon]) => (
             <TouchableOpacity
               key={key}
-              style={[styles.navButton, screen === key && styles.navActive]}
+              style={[styles.navButton, (screen === key || (key === "account" && screen === "support")) && styles.navActive]}
               onPress={() => openScreen(key)}
-              accessibilityLabel={label}
+              accessibilityLabel={key === "account" && supportUnread > 0 ? label + ", new reply" : label}
             >
-              <Ionicons name={icon} size={24} color={screen === key ? colors.onStrong : colors.muted} />
-              <Text style={[styles.navText, screen === key && styles.navTextActive]} numberOfLines={1}>{label}</Text>
+              <View>
+                <Ionicons name={icon} size={24}
+                  color={screen === key || (key === "account" && screen === "support") ? colors.onStrong : colors.muted} />
+                {key === "account" && supportUnread > 0 && <View style={styles.navDot} />}
+              </View>
+              <Text style={[styles.navText, (screen === key || (key === "account" && screen === "support")) && styles.navTextActive]}
+                numberOfLines={1}>{label}</Text>
             </TouchableOpacity>
           ))}
         </View>
@@ -1407,6 +1466,14 @@ function makeStyles(c) {
   customStep: { flex: 1, paddingVertical: 9, borderRadius: 8, backgroundColor: c.subtle, alignItems: "center" },
   customStepText: { fontSize: 12, fontWeight: "bold", color: c.text },
   fieldHint: { fontSize: 13, color: c.muted, marginTop: 4 },
+  supportUnread: {
+    fontSize: 15, fontWeight: "bold", color: c.accent, backgroundColor: c.accentSoft,
+    padding: 10, borderRadius: 8, marginTop: 8,
+  },
+  navDot: {
+    position: "absolute", top: -2, right: -4, width: 10, height: 10, borderRadius: 5,
+    backgroundColor: CRIMSON, borderWidth: 2, borderColor: c.card,
+  },
   statementWait: { fontSize: 15, color: c.accent, marginTop: 12, backgroundColor: c.accentSoft, padding: 12, borderRadius: 8 },
   statementReady: { fontSize: 15, color: c.good, marginTop: 12, backgroundColor: c.goodSoft, padding: 12, borderRadius: 8, fontWeight: "bold" },
   statementRejected: { fontSize: 15, color: c.bad, marginTop: 12, backgroundColor: c.badSoft, padding: 12, borderRadius: 8 },
