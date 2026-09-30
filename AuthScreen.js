@@ -4,10 +4,11 @@
 
 import { useState } from "react";
 import {
-  StyleSheet, Text, View, TextInput, TouchableOpacity,
-  Alert, ActivityIndicator, ScrollView,
+  StyleSheet, Text, TextInput, TouchableOpacity,
+  ActivityIndicator, ScrollView,
 } from "react-native";
 import { supabase } from "./lib/supabase";
+import { notify } from "./lib/notify";
 
 export default function AuthScreen() {
   const [mode, setMode] = useState("login"); // "login" or "register"
@@ -20,19 +21,19 @@ export default function AuthScreen() {
   // Check every registration field before talking to the server
   function validRegistration(cleanEmail, cleanUser, cleanMarket) {
     if (!cleanEmail.includes("@") || !cleanEmail.includes(".")) {
-      Alert.alert("Check your email", "Please enter a valid email address.");
+      notify("Check your email", "Please enter a valid email address.");
       return false;
     }
     if (password.length < 6) {
-      Alert.alert("PIN too short", "Use at least 6 numbers or letters.");
+      notify("PIN too short", "Use at least 6 numbers or letters.");
       return false;
     }
     if (cleanUser.length < 3) {
-      Alert.alert("Username too short", "Use at least 3 letters.");
+      notify("Username too short", "Use at least 3 letters.");
       return false;
     }
     if (cleanMarket.length === 0) {
-      Alert.alert("Market required", "Please enter the name of your market.");
+      notify("Market required", "Please enter the name of your market.");
       return false;
     }
     return true;
@@ -52,11 +53,11 @@ export default function AuthScreen() {
         "username_available", { check_name: cleanUser }
       );
       if (checkError) {
-        Alert.alert("Connection problem", "Please check your internet and try again.");
+        notify("Connection problem", "Please check your internet and try again.");
         return;
       }
       if (!available) {
-        Alert.alert("Username taken", "Please choose a different username.");
+        notify("Username taken", "Please choose a different username.");
         return;
       }
       const { error } = await supabase.auth.signUp({
@@ -65,7 +66,7 @@ export default function AuthScreen() {
         options: { data: { username: cleanUser, market_name: cleanMarket } },
       });
       if (error) {
-        Alert.alert("Registration failed", error.message);
+        notify("Registration failed", error.message);
       }
       // on success the app switches screens by itself through the session listener
     } finally {
@@ -77,7 +78,7 @@ export default function AuthScreen() {
   async function login() {
     const cleanEmail = email.trim().toLowerCase();
     if (!cleanEmail || !password) {
-      Alert.alert("Missing details", "Please enter your email and PIN.");
+      notify("Missing details", "Please enter your email and PIN.");
       return;
     }
     setBusy(true);
@@ -87,7 +88,7 @@ export default function AuthScreen() {
         password: password,
       });
       if (error) {
-        Alert.alert("Login failed", "Wrong email or PIN, please try again.");
+        notify("Login failed", "Wrong email or PIN, please try again.");
       }
     } finally {
       setBusy(false);
@@ -97,7 +98,11 @@ export default function AuthScreen() {
   const registering = mode === "register";
 
   return (
-    <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
+    <ScrollView
+      style={styles.page}
+      contentContainerStyle={styles.body}
+      keyboardShouldPersistTaps="handled"
+    >
       <Text style={styles.title}>Tindahan</Text>
       <Text style={styles.subtitle}>
         {registering ? "Gumawa ng account, register" : "Mag login, log in"}
@@ -168,7 +173,12 @@ export default function AuthScreen() {
 
 // Same large text style as the rest of the app
 const styles = StyleSheet.create({
-  body: { padding: 20, paddingTop: 60, backgroundColor: "#f5f1e8", flexGrow: 1 },
+  page: { backgroundColor: "#f5f1e8" },
+  // on a wide PC screen the form stays a phone sized column in the middle
+  body: {
+    padding: 20, paddingTop: 60, flexGrow: 1,
+    width: "100%", maxWidth: 520, alignSelf: "center",
+  },
   title: { fontSize: 40, fontWeight: "bold", color: "#2d5016" },
   subtitle: { fontSize: 20, color: "#555", marginBottom: 20 },
   label: { fontSize: 18, color: "#555", marginBottom: 6, marginTop: 12 },
