@@ -7,61 +7,60 @@
 // Records are saved on the phone first so the app works with no signal, then
 // synced both ways with Supabase whenever there is internet.
 // The same code also runs in a PC web browser through Expo for web.
-// Premium, 99 pesos a month or 999 a year, adds withdrawals and personal expenses.
+// Every record is business or personal money, and money in or money out.
+// Free tracks business money, premium, 99 pesos a month or 999 a year, adds personal.
 // Vendors pay by GCash in their own GCash app, then send the reference number
 // for the owner to check and approve.
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import {
   StyleSheet, Text, View, TextInput, TouchableOpacity, ScrollView,
-  SafeAreaView, ActivityIndicator, AppState, Platform,
+  SafeAreaView, ActivityIndicator, AppState, Platform, Image, StatusBar,
 } from "react-native";
+import { ThemeProvider, useTheme, EMERALD, INDIGO, CRIMSON } from "./lib/theme";
 import { supabase } from "./lib/supabase";
 import { notify, confirmAction } from "./lib/notify";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   readLocal, updateLocal, syncRecords, newId, nowIso,
-  readProfile, refreshProfile, isPremium, PREMIUM_KINDS, readSchedules,
+  readProfile, refreshProfile, isPremium, scopeNeedsPremium, readSchedules,
 } from "./lib/sync";
 import {
   alarmsSupported, alarmsUnavailable, readReminderSettings, saveReminderSettings,
   askPermission, refreshReminders, notifyNow, testReminder,
 } from "./lib/notifications";
+import { buildStatementHtml, statementRecords, periodFor, longDay, PREMIUM_MONTHS } from "./lib/statement";
+import { savePdf } from "./lib/exportPdf";
 import AuthScreen from "./AuthScreen";
 import ScheduleScreen from "./ScheduleScreen";
 
-// The color palette, shared by every screen
-const SLATE = "#1E293B";      // text, active navigation, structure
-const PAGE = "#F8FAFC";       // background
-const CARD = "#FFFFFF";       // cards and inputs
-const LINE = "#E2E8F0";       // borders
-const MUTED = "#64748B";      // secondary text
-const EMERALD = "#059669";    // money in, growth, main actions
-const INDIGO = "#2563EB";     // premium, withdrawals
-const CRIMSON = "#DC2626";    // money out, errors, alerts
+// Colors come from lib/theme.js, Light or Abyss
 
 // What premium includes, shown wherever a vendor can upgrade
 const PREMIUM_BENEFITS = [
-  "Record withdrawals, money taken from the business for home",
-  "Record personal expenses, separate from the business",
-  "See what is really left after the household takes its share",
+  "Track personal money, separate from the business",
+  "Schedules with reminders so you never miss a bill",
+  "See your total income and expense in one place",
   "Full history and monthly reports, coming soon",
 ];
 const DEFAULT_APPROVAL = "Payments are approved within 2 to 4 hours.";
 
-// How each record type is shown
+// Money in or money out, the only two types
 const KINDS = {
-  in: { button: "MONEY IN", note: "benta, sales", sign: "+", saved: "Money in " },
-  out: { button: "MONEY OUT", note: "gastos sa negosyo", sign: "-", saved: "Money out " },
-  withdrawal: { button: "KINUHA", note: "withdrawal for home", sign: "-", saved: "Withdrawal " },
-  personal: { button: "PERSONAL", note: "personal expense", sign: "-", saved: "Personal expense " },
+  in: { button: "MONEY IN", sign: "+", saved: "Money in " },
+  out: { button: "MONEY OUT", sign: "-", saved: "Money out " },
 };
 
-// The three dashboard tabs and the record types each one shows
+// Business or personal, and the small note under each record
+const SCOPES = {
+  business: { label: "NEGOSYO", sub: "business", note: { in: "negosyo, benta", out: "negosyo, gastos" } },
+  personal: { label: "PERSONAL", sub: "sarili", note: { in: "personal, pumasok", out: "personal, gastos" } },
+};
+
+// The two dashboard tabs
 const TABS = [
-  { key: "business", label: "BUSINESS", kinds: ["in", "out"] },
-  { key: "personal", label: "PERSONAL", kinds: ["personal"] },
-  { key: "withdrawal", label: "WITHDRAWAL", kinds: ["withdrawal"] },
+  { key: "business", label: "NEGOSYO, BUSINESS" },
+  { key: "personal", label: "PERSONAL" },
 ];
 
 // Format a number as Philippine pesos, for example 1250 becomes P 1,250.00
@@ -95,8 +94,19 @@ function spacedNumber(number) {
     : number;
 }
 
-// The top of the app, shows a loading screen, then login, then the tracker
+// The whole app shares one look, Light or Abyss
 export default function App() {
+  return (
+    <ThemeProvider>
+      <Root />
+    </ThemeProvider>
+  );
+}
+
+// The top of the app, shows a loading screen, then login, then the tracker
+function Root() {
+  const { colors } = useTheme();
+  const styles = useMemo(() => makeStyles(colors), [colors]);
   const [session, setSession] = useState(null);
   const [checking, setChecking] = useState(true);
 
@@ -119,14 +129,18 @@ export default function App() {
       </View>
     );
   }
-  if (!session) {
-    return <AuthScreen />;
-  }
-  return <Tracker key={session.user.id} user={session.user} />;
+  return (
+    <>
+      <StatusBar barStyle={colors.statusBar} backgroundColor={colors.page} />
+      {session ? <Tracker key={session.user.id} user={session.user} /> : <AuthScreen />}
+    </>
+  );
 }
 
 // The money tracker itself, shown only to a logged in vendor
 function Tracker({ user }) {
+  const { colors, mode: theme, setMode: setTheme } = useTheme();
+  const styles = useMemo(() => makeStyles(colors), [colors]);
   // which screen is visible, "entry", "dashboard", or "account"
   const [screen, setScreen] = useState("entry");
   // which dashboard tab is open
@@ -137,6 +151,7 @@ function Tracker({ user }) {
   const [amount, setAmount] = useState("");
   const [description, setDescription] = useState("");
   const [kind, setKind] = useState("in");
+  const [scope, setScope] = useState("business");
   // "syncing", "synced", "offline", or "disabled"
   const [syncStatus, setSyncStatus] = useState("syncing");
   // the vendor's own account from the last sync
@@ -161,6 +176,10 @@ function Tracker({ user }) {
   const [alarmStatus, setAlarmStatus] = useState(null);
   // shown once when the owner approves a premium payment
   const [welcome, setWelcome] = useState(false);
+  // income statements, a free vendor's latest request, and a premium vendor's choices
+  const [statementRequest, setStatementRequest] = useState(null);
+  const [statementScope, setStatementScope] = useState("business");
+  const [statementMonths, setStatementMonths] = useState(1);
 
   // Load records and account from the phone, sync, and sync again on return
   useEffect(() => {
@@ -194,6 +213,7 @@ function Tracker({ user }) {
         setSyncStatus(result.profile.disabled ? "disabled" : "synced");
         resetAlarms(result.schedules, result.profile);
         checkWelcome(result.profile);
+        checkStatement(result.profile);
       }
     } catch (error) {
       setSyncStatus("offline");
@@ -250,6 +270,9 @@ function Tracker({ user }) {
   // Open a screen, the account screen loads its forms, the request, and payment details
   function openScreen(next) {
     setScreen(next);
+    if (next === "dashboard") {
+      loadStatementRequest();
+    }
     if (next === "account") {
       setEditUsername(username);
       setEditMarket((profile && profile.market_name) || "");
@@ -263,7 +286,7 @@ function Tracker({ user }) {
   function askUpgrade() {
     confirmAction(
       "Premium feature",
-      "Premium adds withdrawals and personal expenses, 99 pesos a month or 999 a year. See premium in your account?",
+      "Premium lets you track personal money too, 99 pesos a month or 999 a year. See premium in your account?",
       "Open account",
       () => openScreen("account")
     );
@@ -271,13 +294,13 @@ function Tracker({ user }) {
 
   // ----- entry -----
 
-  // Pick a record type, premium types ask free vendors to upgrade instead
-  function chooseKind(nextKind) {
-    if (PREMIUM_KINDS.includes(nextKind) && !premium) {
+  // Pick business or personal, personal asks free vendors to upgrade instead
+  function chooseScope(nextScope) {
+    if (scopeNeedsPremium(nextScope) && !premium) {
       askUpgrade();
       return;
     }
-    setKind(nextKind);
+    setScope(nextScope);
   }
 
   // Validate the form and save one new record
@@ -286,11 +309,8 @@ function Tracker({ user }) {
       notify("Account disabled", "Your account is disabled, so new records cannot be saved. Contact the Tindahan owner.");
       return;
     }
-    if (PREMIUM_KINDS.includes(kind) && !premium) {
-      setKind("in");
-      askUpgrade();
-      return;
-    }
+    // a free vendor, or one whose premium lapsed, always saves business money
+    const saveScope = premium ? scope : "business";
     const value = parseFloat(amount);
     if (isNaN(value) || value <= 0) {
       notify("Check the amount", "Please enter a number bigger than zero.");
@@ -299,6 +319,7 @@ function Tracker({ user }) {
     const record = {
       id: newId(),
       record_date: todayString(),
+      scope: saveScope,
       kind: kind,
       amount: value,
       description: description.trim() || "No description",
@@ -316,7 +337,8 @@ function Tracker({ user }) {
     runSync();
     setAmount("");
     setDescription("");
-    notify("Saved", KINDS[kind].saved + pesos(value));
+    notify("Saved", (saveScope === "personal" ? "Personal, " : "Negosyo, ")
+      + KINDS[kind].saved.toLowerCase() + pesos(value));
   }
 
   // ----- dashboard -----
@@ -345,17 +367,19 @@ function Tracker({ user }) {
   const todays = records.filter((r) => !r.deleted && r.record_date === todayString());
   const unsyncedCount = records.filter((r) => !r.synced).length;
 
-  // Today's total for one record type
-  function total(recordKind) {
-    return todays.filter((r) => r.kind === recordKind).reduce((sum, r) => sum + r.amount, 0);
+  // Today's total for business or personal, money in or money out
+  function total(recordScope, recordKind) {
+    return todays
+      .filter((r) => r.scope === recordScope && r.kind === recordKind)
+      .reduce((sum, r) => sum + r.amount, 0);
   }
-  const moneyIn = total("in");
-  const moneyOut = total("out");
-  const net = moneyIn - moneyOut;
-  const withdrawn = total("withdrawal");
-  const personalSpent = total("personal");
-  const cashLeft = net - withdrawn - personalSpent;
-  const hasHouseholdRecords = withdrawn > 0 || personalSpent > 0;
+  const businessIn = total("business", "in");
+  const businessOut = total("business", "out");
+  const personalIn = total("personal", "in");
+  const personalOut = total("personal", "out");
+  // the top totals add personal money only for premium vendors
+  const allIn = businessIn + (premium ? personalIn : 0);
+  const allOut = businessOut + (premium ? personalOut : 0);
 
   // The words shown for each sync status
   function syncLabel() {
@@ -371,10 +395,83 @@ function Tracker({ user }) {
 
   // The color for an amount depends on its record type
   function amountStyle(recordKind) {
-    if (recordKind === "in") return styles.amountIn;
-    if (recordKind === "withdrawal") return styles.amountWithdrawal;
-    if (recordKind === "personal") return styles.amountPersonal;
-    return styles.amountOut;
+    return recordKind === "in" ? styles.amountIn : styles.amountOut;
+  }
+
+  // ----- income statements -----
+
+  // A free vendor's latest statement request, or null
+  async function loadStatementRequest() {
+    const { data } = await supabase
+      .from("statement_requests")
+      .select("id, status, period_start, period_end, note, created_at, decided_at")
+      .in("status", ["pending", "approved", "rejected"])
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    setStatementRequest(data || null);
+    return data || null;
+  }
+
+  // Tell a free vendor once when the owner approves or rejects their request
+  async function checkStatement(prof) {
+    if (isPremium(prof)) return;
+    const latest = await loadStatementRequest();
+    if (!latest || latest.status === "pending") return;
+    const key = "tindahan_statement_seen_" + user.id;
+    const seen = await AsyncStorage.getItem(key);
+    const now = latest.id + ":" + latest.status;
+    if (seen === now) return;
+    await AsyncStorage.setItem(key, now);
+    if (latest.status === "approved") {
+      notifyNow("Your statement is ready", "Open Tindahan, Today, to download your income statement.");
+    } else {
+      notifyNow("Statement request not approved", latest.note || "Open Tindahan to see why.");
+    }
+  }
+
+  // A free vendor asks the owner for a one month statement
+  async function requestStatement() {
+    setBusy(true);
+    const { error } = await supabase.rpc("request_statement");
+    setBusy(false);
+    if (error) {
+      notify("Could not send the request", "Check your internet and try again.");
+      return;
+    }
+    await loadStatementRequest();
+    notify("Request sent", "The Tindahan owner will review it. You will get a notice when it is ready.");
+  }
+
+  function cancelStatement() {
+    confirmAction("Cancel your statement request?", "You can request again anytime.", "Cancel request", async () => {
+      await supabase.rpc("cancel_statement_request");
+      setStatementRequest(null);
+    });
+  }
+
+  // Build the PDF on the phone from the vendor's own records and share it
+  async function downloadStatement(scope, start, end, confirmedOn) {
+    if (statementRecords(records, scope, start, end).length === 0) {
+      notify("No records yet", "There are no records from " + longDay(start) + " to " + longDay(end) + ".");
+      return;
+    }
+    setBusy(true);
+    try {
+      const html = buildStatementHtml({
+        vendor: { username: username, market: profile && profile.market_name, email: user.email },
+        scope: scope, start: start, end: end, records: records,
+        confirmedOn: confirmedOn, generatedAt: new Date(),
+      });
+      const result = await savePdf(html, "Tindahan statement " + start + " to " + end);
+      if (result === "blocked") {
+        notify("Allow pop ups", "Your browser blocked the statement window. Allow pop ups for Tindahan and try again.");
+      }
+    } catch (error) {
+      notify("Could not make the PDF", "Please try again.");
+    } finally {
+      setBusy(false);
+    }
   }
 
   // ----- account -----
@@ -547,7 +644,18 @@ function Tracker({ user }) {
     return (
       <View>
         <View style={styles.headerRow}>
-          <Text style={styles.title}>{title}</Text>
+          {title === "Tindahan" ? (
+            <Image
+              source={theme === "abyss"
+                ? require("./assets/logo-horizontal-dark.png")
+                : require("./assets/logo-horizontal-light.png")}
+              style={styles.headerLogo}
+              resizeMode="contain"
+              accessibilityLabel="Tindahan"
+            />
+          ) : (
+            <Text style={styles.title}>{title}</Text>
+          )}
           <Text style={premium ? styles.tagPremium : styles.tagFree}>{tierLabel()}</Text>
         </View>
         {disabled && (
@@ -567,6 +675,8 @@ function Tracker({ user }) {
         <Text style={styles.greeting} numberOfLines={1}>Kumusta, {username}</Text>
         <Text style={styles.label}>Ilagay ang halaga, enter the amount</Text>
         <TextInput
+            placeholderTextColor={colors.muted}
+            keyboardAppearance={theme === "abyss" ? "dark" : "light"}
           style={styles.input}
           value={amount}
           onChangeText={setAmount}
@@ -575,33 +685,40 @@ function Tracker({ user }) {
         />
         <Text style={styles.label}>Para saan, description</Text>
         <TextInput
+            placeholderTextColor={colors.muted}
+            keyboardAppearance={theme === "abyss" ? "dark" : "light"}
           style={styles.input}
           value={description}
           onChangeText={setDescription}
           placeholder="halimbawa, benta, pamasahe, kuryente"
         />
-        <View style={styles.kindGrid}>
-          {Object.keys(KINDS).map((k) => {
-            const locked = PREMIUM_KINDS.includes(k) && !premium;
-            return (
-              <TouchableOpacity
-                key={k}
-                style={[
-                  styles.kindButton,
-                  locked && styles.kindLocked,
-                  kind === k && styles["kindActive_" + k],
-                ]}
-                onPress={() => chooseKind(k)}
-              >
-                <Text style={[styles.kindText, kind === k && styles.kindTextActive]}>
-                  {KINDS[k].button}
-                </Text>
-                <Text style={[styles.kindNote, kind === k && styles.kindTextActive]}>
-                  {locked ? "Premium" : KINDS[k].note}
-                </Text>
-              </TouchableOpacity>
-            );
-          })}
+        {premium && (
+          <View>
+            <Text style={styles.label}>Para saan, whose money</Text>
+            <View style={styles.scopeRow}>
+              {Object.keys(SCOPES).map((key) => (
+                <TouchableOpacity
+                  key={key}
+                  style={[styles.scopeButton, scope === key && styles.scopeActive]}
+                  onPress={() => chooseScope(key)}
+                >
+                  <Text style={[styles.scopeText, scope === key && styles.scopeTextActive]}>{SCOPES[key].label}</Text>
+                  <Text style={[styles.scopeSub, scope === key && styles.scopeTextActive]}>{SCOPES[key].sub}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+        )}
+        <View style={styles.kindRow}>
+          {Object.keys(KINDS).map((k) => (
+            <TouchableOpacity
+              key={k}
+              style={[styles.kindButton, kind === k && styles["kindActive_" + k]]}
+              onPress={() => setKind(k)}
+            >
+              <Text style={[styles.kindText, kind === k && styles.kindTextActive]}>{KINDS[k].button}</Text>
+            </TouchableOpacity>
+          ))}
         </View>
         <TouchableOpacity style={styles.saveButton} onPress={saveRecord}>
           <Text style={styles.saveText}>I-SAVE</Text>
@@ -622,8 +739,8 @@ function Tracker({ user }) {
     );
   }
 
-  function renderRecords(kinds) {
-    const list = todays.filter((r) => kinds.includes(r.kind));
+  function renderRecords(recordScope) {
+    const list = todays.filter((r) => r.scope === recordScope);
     if (list.length === 0) {
       return <Text style={styles.empty}>Wala pang record ngayong araw.</Text>;
     }
@@ -641,7 +758,7 @@ function Tracker({ user }) {
             <View style={styles.recordRow}>
               <View style={styles.recordInfo}>
                 <Text style={styles.recordText}>{item.description}</Text>
-                <Text style={styles.recordNote}>{KINDS[item.kind].note}</Text>
+                <Text style={styles.recordNote}>{SCOPES[item.scope].note[item.kind]}</Text>
               </View>
               <Text style={amountStyle(item.kind)}>
                 {KINDS[item.kind].sign + pesos(item.amount)}
@@ -662,9 +779,121 @@ function Tracker({ user }) {
     );
   }
 
+  // Money in, money out, and what is left, the same layout for business and personal
+  function renderScope(recordScope) {
+    const moneyIn = recordScope === "business" ? businessIn : personalIn;
+    const moneyOut = recordScope === "business" ? businessOut : personalOut;
+    const left = moneyIn - moneyOut;
+    return (
+      <View>
+        {renderTotal("Money in", moneyIn, styles.amountIn)}
+        {renderTotal("Money out", moneyOut, styles.amountOut)}
+        {renderTotal(recordScope === "business" ? "Kita, business net" : "Natira, personal net",
+          left, left >= 0 ? styles.amountIn : styles.amountOut)}
+        {renderRecords(recordScope)}
+      </View>
+    );
+  }
+
+  // The statement card, at the very bottom of TODAY
+  function renderStatementCard() {
+    const heading = (
+      <View>
+        <Text style={styles.statementTitle}>Kailangan ng loan? Need a loan?</Text>
+        <Text style={styles.statementText}>
+          Lenders often ask for proof of income. Download a statement of your recorded income, free.
+        </Text>
+      </View>
+    );
+    if (premium) {
+      const period = periodFor(statementMonths, new Date());
+      return (
+        <View style={styles.statementCard}>
+          {heading}
+          <View style={styles.statementRow}>
+            {[["business", "NEGOSYO"], ["personal", "PERSONAL INCOME"]].map(([key, label]) => (
+              <TouchableOpacity
+                key={key}
+                style={[styles.statementChip, statementScope === key && styles.statementChipActive]}
+                onPress={() => setStatementScope(key)}
+              >
+                <Text style={[styles.statementChipText, statementScope === key && styles.statementChipTextActive]}>{label}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+          <View style={styles.statementRow}>
+            {PREMIUM_MONTHS.map((m) => (
+              <TouchableOpacity
+                key={m}
+                style={[styles.statementChip, statementMonths === m && styles.statementChipActive]}
+                onPress={() => setStatementMonths(m)}
+              >
+                <Text style={[styles.statementChipText, statementMonths === m && styles.statementChipTextActive]}>
+                  {m === 1 ? "1 MONTH" : m + " MONTHS"}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+          <Text style={styles.statementPeriod}>{longDay(period.start)} to {longDay(period.end)}</Text>
+          <TouchableOpacity
+            style={styles.statementButton}
+            onPress={() => downloadStatement(statementScope, period.start, period.end, null)}
+            disabled={busy}
+          >
+            <Text style={styles.statementButtonText}>DOWNLOAD STATEMENT, PDF</Text>
+          </TouchableOpacity>
+        </View>
+      );
+    }
+    const r = statementRequest;
+    return (
+      <View style={styles.statementCard}>
+        {heading}
+        {r && r.status === "pending" ? (
+          <View>
+            <Text style={styles.statementWait}>
+              Waiting for approval, sent {shortDate(r.created_at)}. You will get a notice when it is ready.
+            </Text>
+            <TouchableOpacity onPress={cancelStatement}>
+              <Text style={styles.linkText}>Cancel request</Text>
+            </TouchableOpacity>
+          </View>
+        ) : r && r.status === "approved" ? (
+          <View>
+            <Text style={styles.statementReady}>
+              Approved. Your statement covers {longDay(r.period_start)} to {longDay(r.period_end)}.
+            </Text>
+            <TouchableOpacity
+              style={styles.statementButton}
+              onPress={() => downloadStatement("business", r.period_start, r.period_end, r.decided_at.slice(0, 10))}
+              disabled={busy}
+            >
+              <Text style={styles.statementButtonText}>DOWNLOAD STATEMENT, PDF</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={requestStatement} disabled={busy}>
+              <Text style={styles.statementLink}>Request a newer statement</Text>
+            </TouchableOpacity>
+          </View>
+        ) : (
+          <View>
+            {r && r.status === "rejected" && (
+              <Text style={styles.statementRejected}>Your last request was not approved. {r.note}</Text>
+            )}
+            <Text style={styles.statementNote}>Free accounts get the last 1 month of business records, after the owner approves.</Text>
+            <TouchableOpacity style={styles.statementButton} onPress={requestStatement} disabled={busy}>
+              <Text style={styles.statementButtonText}>REQUEST MY STATEMENT</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => openScreen("account")}>
+              <Text style={styles.statementLink}>Premium gets up to 6 months, instantly</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+      </View>
+    );
+  }
+
   function renderDashboard() {
-    const current = TABS.find((t) => t.key === tab);
-    const lockedTab = tab !== "business" && !premium && !hasHouseholdRecords;
+    const shownScope = premium ? tab : "business";
     return (
       <ScrollView contentContainerStyle={styles.body}>
         {renderHeader("Ngayong araw")}
@@ -674,40 +903,40 @@ function Tracker({ user }) {
           </Text>
         </TouchableOpacity>
 
-        <View style={styles.tabBar}>
-          {TABS.map((t) => (
-            <TouchableOpacity
-              key={t.key}
-              style={[styles.tabButton, tab === t.key && styles.tabActive]}
-              onPress={() => setTab(t.key)}
-            >
-              <Text style={[styles.tabText, tab === t.key && styles.tabTextActive]}>{t.label}</Text>
-            </TouchableOpacity>
-          ))}
+        <View style={styles.summaryRow}>
+          <View style={[styles.summaryBox, styles.summaryIncome]}>
+            <Text style={styles.summaryLabel}>Total income</Text>
+            <Text style={styles.summaryIncomeValue}>{pesos(allIn)}</Text>
+          </View>
+          <View style={[styles.summaryBox, styles.summaryExpense]}>
+            <Text style={styles.summaryLabel}>Total expense</Text>
+            <Text style={styles.summaryExpenseValue}>{pesos(allOut)}</Text>
+          </View>
         </View>
 
-        {(premium || hasHouseholdRecords) && (
-          <View style={styles.cashLeft}>
-            <Text style={styles.cashLeftLabel}>Natira, cash left</Text>
-            <Text style={cashLeft >= 0 ? styles.amountIn : styles.amountOut}>{pesos(cashLeft)}</Text>
+        {premium && (
+          <View style={styles.tabBar}>
+            {TABS.map((t) => (
+              <TouchableOpacity
+                key={t.key}
+                style={[styles.tabButton, tab === t.key && styles.tabActive]}
+                onPress={() => setTab(t.key)}
+              >
+                <Text style={[styles.tabText, tab === t.key && styles.tabTextActive]}>{t.label}</Text>
+              </TouchableOpacity>
+            ))}
           </View>
         )}
 
-        {tab === "business" && (
-          <View>
-            {renderTotal("Money in", moneyIn, styles.amountIn)}
-            {renderTotal("Money out", moneyOut, styles.amountOut)}
-            {renderTotal("Kita, business net", net, net >= 0 ? styles.amountIn : styles.amountOut)}
-          </View>
-        )}
-        {tab === "personal" && !lockedTab && renderTotal("Personal na gastos", personalSpent, styles.amountPersonal)}
-        {tab === "withdrawal" && !lockedTab && renderTotal("Kinuha para sa bahay", withdrawn, styles.amountWithdrawal)}
+        {renderScope(shownScope)}
 
-        {lockedTab
-          ? renderUpgradeCard(tab === "personal"
-            ? "Keep personal spending separate from the business."
-            : "See how much the household takes from the business.")
-          : renderRecords(current.kinds)}
+        {!premium && (
+          <TouchableOpacity style={styles.upgradeHint} onPress={() => openScreen("account")}>
+            <Text style={styles.upgradeHintText}>Track personal money too with Premium, 99 pesos a month.</Text>
+          </TouchableOpacity>
+        )}
+
+        {renderStatementCard()}
       </ScrollView>
     );
   }
@@ -787,6 +1016,8 @@ function Tracker({ user }) {
                 <Text style={styles.payName}>{payment.gcash_name}</Text>
                 <Text style={styles.payStep}>2. Type the reference number from your GCash receipt</Text>
                 <TextInput
+            placeholderTextColor={colors.muted}
+            keyboardAppearance={theme === "abyss" ? "dark" : "light"}
                   style={styles.input}
                   value={reference}
                   onChangeText={setReference}
@@ -865,7 +1096,7 @@ function Tracker({ user }) {
           <Text style={styles.welcomeText}>
             Your payment is approved, salamat. You now have premium until {shortDate(profile.premium_until)}.
           </Text>
-          {["Withdrawals and personal expenses", "Schedules with reminders for your bills", "What is really left after the household share"].map((b) => (
+          {["Personal money, separate from the business", "Schedules with reminders for your bills", "Your total income and expense in one place"].map((b) => (
             <Text key={b} style={styles.welcomeBenefit}>{"\u2713  "}{b}</Text>
           ))}
           <TouchableOpacity style={styles.welcomeButton} onPress={() => { setWelcome(false); openScreen("schedule"); }}>
@@ -892,6 +1123,8 @@ function Tracker({ user }) {
           <Text style={styles.cardTitle}>Profile</Text>
           <Text style={styles.label}>Username</Text>
           <TextInput
+            placeholderTextColor={colors.muted}
+            keyboardAppearance={theme === "abyss" ? "dark" : "light"}
             style={styles.input}
             value={editUsername}
             onChangeText={setEditUsername}
@@ -914,6 +1147,22 @@ function Tracker({ user }) {
           <TouchableOpacity style={styles.primaryButton} onPress={changePin} disabled={busy}>
             <Text style={styles.primaryButtonText}>CHANGE PIN</Text>
           </TouchableOpacity>
+        </View>
+
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>Itsura, appearance</Text>
+          <View style={styles.themeRow}>
+            {[["light", "LIGHT", "maliwanag"], ["abyss", "ABYSS", "madilim"]].map(([key, label, sub]) => (
+              <TouchableOpacity
+                key={key}
+                style={[styles.themeButton, theme === key && styles.themeActive]}
+                onPress={() => setTheme(key)}
+              >
+                <Text style={[styles.themeText, theme === key && styles.themeTextActive]}>{label}</Text>
+                <Text style={[styles.themeSub, theme === key && styles.themeTextActive]}>{sub}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
         </View>
 
         <TouchableOpacity style={styles.logoutButton} onPress={logout}>
@@ -950,23 +1199,36 @@ function Tracker({ user }) {
 }
 
 // Styles, large text and big touch targets for elderly and low literacy users
-const styles = StyleSheet.create({
+function makeStyles(c) {
+  return StyleSheet.create({
   // the page fills the window, on a wide PC screen the app is a column in the middle
-  page: { flex: 1, backgroundColor: "#E2E8F0" },
-  container: { flex: 1, width: "100%", maxWidth: 560, alignSelf: "center", backgroundColor: PAGE },
+  page: { flex: 1, backgroundColor: c.outer },
+  container: { flex: 1, width: "100%", maxWidth: 560, alignSelf: "center", backgroundColor: c.page },
   screen: { flex: 1 },
   body: { padding: 20, paddingTop: 40, paddingBottom: 40 },
-  center: { flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: PAGE },
+  center: { flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: c.page },
 
   headerRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 },
-  title: { fontSize: 32, fontWeight: "bold", color: SLATE, flexShrink: 1 },
-  greeting: { fontSize: 20, color: SLATE, marginTop: 6 },
+  headerLogo: { width: 150, height: 47, flexShrink: 1 },
+
+  // light or abyss
+  themeRow: { flexDirection: "row", gap: 10, marginTop: 12 },
+  themeButton: {
+    flex: 1, paddingVertical: 14, borderRadius: 10, alignItems: "center",
+    borderWidth: 2, borderColor: c.line, backgroundColor: c.card,
+  },
+  themeActive: { backgroundColor: c.strong, borderColor: c.strong },
+  themeText: { fontSize: 18, fontWeight: "bold", color: c.text },
+  themeSub: { fontSize: 13, color: c.muted, marginTop: 2 },
+  themeTextActive: { color: c.onStrong },
+  title: { fontSize: 32, fontWeight: "bold", color: c.text, flexShrink: 1 },
+  greeting: { fontSize: 20, color: c.text, marginTop: 6 },
   tagPremium: {
     backgroundColor: INDIGO, color: "white", fontWeight: "bold", fontSize: 14,
     paddingVertical: 5, paddingHorizontal: 10, borderRadius: 6, overflow: "hidden", flexShrink: 0,
   },
   tagFree: {
-    backgroundColor: LINE, color: MUTED, fontWeight: "bold", fontSize: 14,
+    backgroundColor: c.line, color: c.muted, fontWeight: "bold", fontSize: 14,
     paddingVertical: 5, paddingHorizontal: 10, borderRadius: 6, overflow: "hidden", flexShrink: 0,
   },
   bannerDanger: {
@@ -974,112 +1236,144 @@ const styles = StyleSheet.create({
     padding: 12, borderRadius: 10, marginTop: 12,
   },
 
-  label: { fontSize: 18, color: MUTED, marginBottom: 6, marginTop: 14 },
-  hint: { fontSize: 15, color: MUTED, marginTop: 12, marginBottom: 6 },
+  label: { fontSize: 18, color: c.muted, marginBottom: 6, marginTop: 14 },
+  hint: { fontSize: 15, color: c.muted, marginTop: 12, marginBottom: 6 },
   input: {
-    backgroundColor: CARD, borderRadius: 10, padding: 14, color: SLATE,
-    fontSize: 22, borderWidth: 1, borderColor: LINE,
+    backgroundColor: c.card, borderRadius: 10, padding: 14, color: c.text,
+    fontSize: 22, borderWidth: 1, borderColor: c.line,
   },
 
-  // four equal record type buttons in a two by two grid
-  kindGrid: { flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between", marginTop: 20, rowGap: 10 },
-  kindButton: {
-    width: "48.5%", minHeight: 78, paddingVertical: 12, paddingHorizontal: 8,
-    borderRadius: 10, backgroundColor: CARD, borderWidth: 2, borderColor: LINE,
-    alignItems: "center", justifyContent: "center",
+  // the business or personal switch, premium only
+  scopeRow: { flexDirection: "row", gap: 10 },
+  scopeButton: {
+    flex: 1, paddingVertical: 12, borderRadius: 10, alignItems: "center",
+    borderWidth: 2, borderColor: c.line, backgroundColor: c.card,
   },
-  kindLocked: { backgroundColor: "#F1F5F9", borderStyle: "dashed" },
+  scopeActive: { backgroundColor: c.strong, borderColor: c.strong },
+  scopeText: { fontSize: 19, fontWeight: "bold", color: c.text },
+  scopeSub: { fontSize: 13, color: c.muted, marginTop: 2 },
+  scopeTextActive: { color: c.onStrong },
+
+  // the two big money buttons
+  kindRow: { flexDirection: "row", gap: 10, marginTop: 20 },
+  kindButton: {
+    flex: 1, minHeight: 72, borderRadius: 12, backgroundColor: c.card,
+    borderWidth: 2, borderColor: c.line, alignItems: "center", justifyContent: "center",
+  },
   kindActive_in: { backgroundColor: EMERALD, borderColor: EMERALD },
   kindActive_out: { backgroundColor: CRIMSON, borderColor: CRIMSON },
-  kindActive_withdrawal: { backgroundColor: INDIGO, borderColor: INDIGO },
-  kindActive_personal: { backgroundColor: SLATE, borderColor: SLATE },
-  kindText: { fontSize: 19, fontWeight: "bold", color: SLATE, textAlign: "center" },
-  kindNote: { fontSize: 13, color: MUTED, marginTop: 3, textAlign: "center" },
+  kindText: { fontSize: 21, fontWeight: "bold", color: c.text },
   kindTextActive: { color: "white" },
 
   saveButton: { marginTop: 26, backgroundColor: EMERALD, padding: 20, borderRadius: 12, alignItems: "center" },
   saveText: { fontSize: 26, fontWeight: "bold", color: "white" },
 
-  syncOk: { fontSize: 15, color: EMERALD, marginTop: 8 },
-  syncBad: { fontSize: 15, color: CRIMSON, marginTop: 8, fontWeight: "bold" },
+  syncOk: { fontSize: 15, color: c.good, marginTop: 8 },
+  syncBad: { fontSize: 15, color: c.bad, marginTop: 8, fontWeight: "bold" },
 
   // the business, personal, withdrawal switch at the top of the dashboard
-  tabBar: { flexDirection: "row", marginTop: 16, backgroundColor: LINE, borderRadius: 10, padding: 4 },
+  tabBar: { flexDirection: "row", marginTop: 16, backgroundColor: c.line, borderRadius: 10, padding: 4 },
   tabButton: { flex: 1, paddingVertical: 12, borderRadius: 8, alignItems: "center" },
-  tabActive: { backgroundColor: SLATE },
-  tabText: { fontSize: 14, fontWeight: "bold", color: MUTED },
-  tabTextActive: { color: "white" },
+  tabActive: { backgroundColor: c.strong },
+  tabText: { fontSize: 14, fontWeight: "bold", color: c.muted },
+  tabTextActive: { color: c.onStrong },
 
-  cashLeft: {
-    flexDirection: "row", justifyContent: "space-between", alignItems: "center",
-    backgroundColor: "#ECFDF5", borderLeftWidth: 6, borderLeftColor: EMERALD,
-    borderRadius: 10, padding: 14, marginTop: 14,
+  // total income and total expense at the top of today
+  summaryRow: { flexDirection: "row", gap: 10, marginTop: 14 },
+  summaryBox: { flex: 1, borderRadius: 12, padding: 14 },
+  summaryIncome: { backgroundColor: c.goodSoft },
+  summaryExpense: { backgroundColor: c.badSoft },
+  summaryLabel: { fontSize: 15, color: c.text, fontWeight: "bold" },
+  summaryIncomeValue: { fontSize: 22, fontWeight: "bold", color: c.good, marginTop: 4 },
+  summaryExpenseValue: { fontSize: 22, fontWeight: "bold", color: c.bad, marginTop: 4 },
+  upgradeHint: { marginTop: 16, backgroundColor: c.accentSoft, borderRadius: 10, padding: 14 },
+  upgradeHintText: { fontSize: 16, color: c.accent, fontWeight: "bold" },
+
+  // the statement nudge at the bottom of today
+  statementCard: {
+    marginTop: 24, borderRadius: 12, padding: 16, backgroundColor: c.card,
+    borderWidth: 2, borderColor: c.line, borderStyle: "dashed",
   },
-  cashLeftLabel: { fontSize: 18, fontWeight: "bold", color: SLATE },
+  statementTitle: { fontSize: 19, fontWeight: "bold", color: c.text },
+  statementText: { fontSize: 15, color: c.muted, marginTop: 4 },
+  statementRow: { flexDirection: "row", gap: 8, marginTop: 12 },
+  statementChip: {
+    flex: 1, paddingVertical: 10, borderRadius: 8, alignItems: "center",
+    borderWidth: 2, borderColor: c.line, backgroundColor: c.card,
+  },
+  statementChipActive: { backgroundColor: c.strong, borderColor: c.strong },
+  statementChipText: { fontSize: 13, fontWeight: "bold", color: c.text },
+  statementChipTextActive: { color: c.onStrong },
+  statementPeriod: { fontSize: 15, color: c.text, marginTop: 10, textAlign: "center" },
+  statementButton: { marginTop: 12, backgroundColor: EMERALD, padding: 15, borderRadius: 10, alignItems: "center" },
+  statementButtonText: { fontSize: 16, fontWeight: "bold", color: "white" },
+  statementLink: { fontSize: 15, color: c.accent, fontWeight: "bold", textAlign: "center", marginTop: 12 },
+  statementNote: { fontSize: 14, color: c.muted, marginTop: 10 },
+  statementWait: { fontSize: 15, color: c.accent, marginTop: 12, backgroundColor: c.accentSoft, padding: 12, borderRadius: 8 },
+  statementReady: { fontSize: 15, color: c.good, marginTop: 12, backgroundColor: c.goodSoft, padding: 12, borderRadius: 8, fontWeight: "bold" },
+  statementRejected: { fontSize: 15, color: c.bad, marginTop: 12, backgroundColor: c.badSoft, padding: 12, borderRadius: 8 },
 
   totalBox: {
-    backgroundColor: CARD, borderRadius: 10, padding: 16, marginTop: 10,
-    borderWidth: 1, borderColor: LINE,
+    backgroundColor: c.card, borderRadius: 10, padding: 16, marginTop: 10,
+    borderWidth: 1, borderColor: c.line,
     flexDirection: "row", justifyContent: "space-between", alignItems: "center",
   },
-  totalLabel: { fontSize: 19, color: SLATE, flexShrink: 1 },
-  amountIn: { fontSize: 21, fontWeight: "bold", color: EMERALD },
-  amountOut: { fontSize: 21, fontWeight: "bold", color: CRIMSON },
-  amountWithdrawal: { fontSize: 21, fontWeight: "bold", color: INDIGO },
-  amountPersonal: { fontSize: 21, fontWeight: "bold", color: SLATE },
+  totalLabel: { fontSize: 19, color: c.text, flexShrink: 1 },
+  amountIn: { fontSize: 21, fontWeight: "bold", color: c.good },
+  amountOut: { fontSize: 21, fontWeight: "bold", color: c.bad },
 
   recordRow: {
-    backgroundColor: CARD, borderRadius: 8, padding: 14, marginBottom: 8,
-    borderWidth: 1, borderColor: LINE,
+    backgroundColor: c.card, borderRadius: 8, padding: 14, marginBottom: 8,
+    borderWidth: 1, borderColor: c.line,
     flexDirection: "row", justifyContent: "space-between", alignItems: "center",
   },
   recordInfo: { flex: 1, marginRight: 10 },
-  recordText: { fontSize: 18, color: SLATE },
-  recordNote: { fontSize: 14, color: MUTED },
-  empty: { fontSize: 17, color: MUTED, marginTop: 16 },
+  recordText: { fontSize: 18, color: c.text },
+  recordNote: { fontSize: 14, color: c.muted },
+  empty: { fontSize: 17, color: c.muted, marginTop: 16 },
 
   upgradeCard: {
-    backgroundColor: CARD, borderRadius: 12, padding: 18, marginTop: 14,
+    backgroundColor: c.card, borderRadius: 12, padding: 18, marginTop: 14,
     borderWidth: 2, borderColor: INDIGO,
   },
-  upgradeTitle: { fontSize: 19, color: SLATE, fontWeight: "bold" },
-  upgradePrice: { fontSize: 16, color: INDIGO, marginTop: 6 },
+  upgradeTitle: { fontSize: 19, color: c.text, fontWeight: "bold" },
+  upgradePrice: { fontSize: 16, color: c.accent, marginTop: 6 },
 
   card: {
-    backgroundColor: CARD, borderRadius: 12, padding: 18, marginTop: 16,
-    borderWidth: 1, borderColor: LINE,
+    backgroundColor: c.card, borderRadius: 12, padding: 18, marginTop: 16,
+    borderWidth: 1, borderColor: c.line,
   },
   premiumCard: { borderWidth: 2, borderColor: INDIGO },
-  cardTitle: { fontSize: 22, fontWeight: "bold", color: SLATE },
-  cardText: { fontSize: 17, color: SLATE, marginTop: 8, marginBottom: 6 },
-  benefit: { fontSize: 16, color: SLATE, marginTop: 6 },
-  stepTitle: { fontSize: 18, fontWeight: "bold", color: SLATE, marginTop: 18 },
+  cardTitle: { fontSize: 22, fontWeight: "bold", color: c.text },
+  cardText: { fontSize: 17, color: c.text, marginTop: 8, marginBottom: 6 },
+  benefit: { fontSize: 16, color: c.text, marginTop: 6 },
+  stepTitle: { fontSize: 18, fontWeight: "bold", color: c.text, marginTop: 18 },
 
   // the monthly and annual plan picker
   planRow: { flexDirection: "row", gap: 10, marginTop: 10 },
   planCard: {
-    flex: 1, borderWidth: 2, borderColor: LINE, borderRadius: 10,
-    padding: 12, alignItems: "center", backgroundColor: CARD,
+    flex: 1, borderWidth: 2, borderColor: c.line, borderRadius: 10,
+    padding: 12, alignItems: "center", backgroundColor: c.card,
   },
   planActive: { backgroundColor: INDIGO, borderColor: INDIGO },
-  planName: { fontSize: 16, fontWeight: "bold", color: SLATE },
-  planPrice: { fontSize: 24, fontWeight: "bold", color: SLATE, marginTop: 2 },
-  planDetail: { fontSize: 13, color: MUTED, marginTop: 2, textAlign: "center" },
+  planName: { fontSize: 16, fontWeight: "bold", color: c.text },
+  planPrice: { fontSize: 24, fontWeight: "bold", color: c.text, marginTop: 2 },
+  planDetail: { fontSize: 13, color: c.muted, marginTop: 2, textAlign: "center" },
   planTextActive: { color: "white" },
 
   // the GCash payment steps
-  payBox: { marginTop: 14, backgroundColor: "#EFF6FF", borderRadius: 10, padding: 14 },
-  payStep: { fontSize: 16, color: SLATE, marginTop: 10, marginBottom: 6 },
-  payNumber: { fontSize: 28, fontWeight: "bold", color: INDIGO, letterSpacing: 1 },
-  payName: { fontSize: 16, color: SLATE },
-  waitBox: { marginTop: 14, backgroundColor: "#EFF6FF", borderRadius: 10, padding: 14 },
-  waitTitle: { fontSize: 18, fontWeight: "bold", color: INDIGO },
-  waitText: { fontSize: 16, color: SLATE, marginTop: 6 },
+  payBox: { marginTop: 14, backgroundColor: c.accentSoft, borderRadius: 10, padding: 14 },
+  payStep: { fontSize: 16, color: c.text, marginTop: 10, marginBottom: 6 },
+  payNumber: { fontSize: 28, fontWeight: "bold", color: c.accent, letterSpacing: 1 },
+  payName: { fontSize: 16, color: c.text },
+  waitBox: { marginTop: 14, backgroundColor: c.accentSoft, borderRadius: 10, padding: 14 },
+  waitTitle: { fontSize: 18, fontWeight: "bold", color: c.accent },
+  waitText: { fontSize: 16, color: c.text, marginTop: 6 },
   rejectBox: {
     fontSize: 16, color: "white", backgroundColor: CRIMSON,
     padding: 12, borderRadius: 8, marginTop: 14,
   },
-  linkText: { fontSize: 16, color: CRIMSON, fontWeight: "bold", marginTop: 12 },
+  linkText: { fontSize: 16, color: c.bad, fontWeight: "bold", marginTop: 12 },
 
   primaryButton: { marginTop: 16, backgroundColor: EMERALD, padding: 16, borderRadius: 10, alignItems: "center" },
   primaryButtonText: { fontSize: 18, fontWeight: "bold", color: "white" },
@@ -1089,21 +1383,21 @@ const styles = StyleSheet.create({
     marginTop: 20, padding: 14, borderRadius: 10,
     borderWidth: 2, borderColor: CRIMSON, alignItems: "center",
   },
-  logoutText: { fontSize: 18, fontWeight: "bold", color: CRIMSON },
+  logoutText: { fontSize: 18, fontWeight: "bold", color: c.bad },
 
-  nav: { flexDirection: "row", borderTopWidth: 1, borderColor: LINE, backgroundColor: CARD },
+  nav: { flexDirection: "row", borderTopWidth: 1, borderColor: c.line, backgroundColor: c.card },
   navButton: { flex: 1, paddingVertical: 16, alignItems: "center" },
-  navActive: { backgroundColor: SLATE },
-  navText: { fontSize: 13, fontWeight: "bold", color: MUTED },
-  navTextActive: { color: "white" },
+  navActive: { backgroundColor: c.strong },
+  navText: { fontSize: 13, fontWeight: "bold", color: c.muted },
+  navTextActive: { color: c.onStrong },
 
   // reminder settings
   toggleRow: {
     flexDirection: "row", justifyContent: "space-between", alignItems: "center",
-    paddingVertical: 12, borderBottomWidth: 1, borderColor: LINE,
+    paddingVertical: 12, borderBottomWidth: 1, borderColor: c.line,
   },
-  toggleLabel: { fontSize: 18, color: SLATE, flexShrink: 1 },
-  toggle: { width: 56, height: 32, borderRadius: 16, backgroundColor: LINE, padding: 3 },
+  toggleLabel: { fontSize: 18, color: c.text, flexShrink: 1 },
+  toggle: { width: 56, height: 32, borderRadius: 16, backgroundColor: c.line, padding: 3 },
   toggleOn: { backgroundColor: EMERALD },
   knob: { width: 26, height: 26, borderRadius: 13, backgroundColor: "white" },
   knobOn: { marginLeft: 24 },
@@ -1111,23 +1405,24 @@ const styles = StyleSheet.create({
     marginTop: 12, padding: 14, borderRadius: 10, alignItems: "center",
     borderWidth: 2, borderColor: INDIGO,
   },
-  outlineButtonText: { fontSize: 16, fontWeight: "bold", color: INDIGO },
+  outlineButtonText: { fontSize: 16, fontWeight: "bold", color: c.accent },
 
   // the welcome to premium screen
   welcomeOverlay: {
     position: "absolute", top: 0, left: 0, right: 0, bottom: 0,
-    backgroundColor: "rgba(30, 41, 59, 0.85)", justifyContent: "center", padding: 20,
+    backgroundColor: c.overlay, justifyContent: "center", padding: 20,
   },
   welcomeCard: {
-    backgroundColor: CARD, borderRadius: 16, padding: 24,
+    backgroundColor: c.card, borderRadius: 16, padding: 24,
     width: "100%", maxWidth: 480, alignSelf: "center",
     borderTopWidth: 8, borderTopColor: INDIGO,
   },
-  welcomeTag: { fontSize: 14, fontWeight: "bold", color: INDIGO, letterSpacing: 2 },
-  welcomeTitle: { fontSize: 28, fontWeight: "bold", color: SLATE, marginTop: 6 },
-  welcomeText: { fontSize: 17, color: SLATE, marginTop: 10, marginBottom: 8 },
-  welcomeBenefit: { fontSize: 16, color: SLATE, marginTop: 6 },
+  welcomeTag: { fontSize: 14, fontWeight: "bold", color: c.accent, letterSpacing: 2 },
+  welcomeTitle: { fontSize: 28, fontWeight: "bold", color: c.text, marginTop: 6 },
+  welcomeText: { fontSize: 17, color: c.text, marginTop: 10, marginBottom: 8 },
+  welcomeBenefit: { fontSize: 16, color: c.text, marginTop: 6 },
   welcomeButton: { marginTop: 20, backgroundColor: EMERALD, padding: 16, borderRadius: 10, alignItems: "center" },
   welcomeButtonText: { fontSize: 17, fontWeight: "bold", color: "white" },
-  welcomeLater: { fontSize: 16, color: MUTED, fontWeight: "bold", textAlign: "center", marginTop: 14 },
-});
+  welcomeLater: { fontSize: 16, color: c.muted, fontWeight: "bold", textAlign: "center", marginTop: 14 },
+  });
+}
