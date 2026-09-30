@@ -173,24 +173,24 @@ export default function AuthScreen() {
 
 // Same large text style as the rest of the app
 const styles = StyleSheet.create({
-  page: { backgroundColor: "#f5f1e8" },
+  page: { backgroundColor: "#F8FAFC" },
   // on a wide PC screen the form stays a phone sized column in the middle
   body: {
     padding: 20, paddingTop: 60, flexGrow: 1,
     width: "100%", maxWidth: 520, alignSelf: "center",
   },
-  title: { fontSize: 40, fontWeight: "bold", color: "#2d5016" },
-  subtitle: { fontSize: 20, color: "#555", marginBottom: 20 },
-  label: { fontSize: 18, color: "#555", marginBottom: 6, marginTop: 12 },
+  title: { fontSize: 40, fontWeight: "bold", color: "#1E293B" },
+  subtitle: { fontSize: 20, color: "#64748B", marginBottom: 20 },
+  label: { fontSize: 18, color: "#64748B", marginBottom: 6, marginTop: 12 },
   input: {
     backgroundColor: "white", borderRadius: 10, padding: 16,
-    fontSize: 22, borderWidth: 1, borderColor: "#ccc",
+    fontSize: 22, borderWidth: 1, borderColor: "#E2E8F0", color: "#1E293B",
   },
   mainButton: {
-    marginTop: 30, backgroundColor: "#2d5016", padding: 22,
+    marginTop: 30, backgroundColor: "#059669", padding: 22,
     borderRadius: 12, alignItems: "center",
   },
   mainText: { fontSize: 24, fontWeight: "bold", color: "white" },
-  switchText: { fontSize: 18, color: "#2d5016", textAlign: "center", marginTop: 20 },
-  notice: { fontSize: 14, color: "#888", textAlign: "center", marginTop: 30 },
+  switchText: { fontSize: 18, color: "#2563EB", textAlign: "center", marginTop: 20 },
+  notice: { fontSize: 14, color: "#64748B", textAlign: "center", marginTop: 30 },
 });

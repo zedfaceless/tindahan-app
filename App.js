@@ -2,11 +2,13 @@
 // Tindahan, a money tracker for public market vendors.
 // Built to learn React Native with Expo. Three screens, Entry to record money,
 // Dashboard for today's totals in Business, Personal, and Withdrawal tabs, and
-// Account to edit the profile, change the PIN, and request premium.
+// Account to edit the profile, change the PIN, and get premium.
 // Records are saved on the phone first so the app works with no signal, then
 // synced both ways with Supabase whenever there is internet.
 // The same code also runs in a PC web browser through Expo for web.
-// Premium, 99 pesos a month, adds withdrawals and personal expenses.
+// Premium, 99 pesos a month or 999 a year, adds withdrawals and personal expenses.
+// Vendors pay by GCash in their own GCash app, then send the reference number
+// for the owner to check and approve.
 
 import { useState, useEffect } from "react";
 import {
@@ -21,6 +23,16 @@ import {
 } from "./lib/sync";
 import AuthScreen from "./AuthScreen";
 
+// The color palette, shared by every screen
+const SLATE = "#1E293B";      // text, active navigation, structure
+const PAGE = "#F8FAFC";       // background
+const CARD = "#FFFFFF";       // cards and inputs
+const LINE = "#E2E8F0";       // borders
+const MUTED = "#64748B";      // secondary text
+const EMERALD = "#059669";    // money in, growth, main actions
+const INDIGO = "#2563EB";     // premium, withdrawals
+const CRIMSON = "#DC2626";    // money out, errors, alerts
+
 // What premium includes, shown wherever a vendor can upgrade
 const PREMIUM_BENEFITS = [
   "Record withdrawals, money taken from the business for home",
@@ -28,7 +40,7 @@ const PREMIUM_BENEFITS = [
   "See what is really left after the household takes its share",
   "Full history and monthly reports, coming soon",
 ];
-const PAYMENT_NOTE = "After you request, the Tindahan owner will contact you about payment.";
+const DEFAULT_APPROVAL = "Payments are approved within 2 to 4 hours.";
 
 // How each record type is shown
 const KINDS = {
@@ -69,6 +81,13 @@ function shortDate(value) {
   });
 }
 
+// 09615689971 is shown as 0961 568 9971, easier to type into GCash
+function spacedNumber(number) {
+  return number.length === 11
+    ? number.slice(0, 4) + " " + number.slice(4, 7) + " " + number.slice(7)
+    : number;
+}
+
 // The top of the app, shows a loading screen, then login, then the tracker
 export default function App() {
   const [session, setSession] = useState(null);
@@ -89,7 +108,7 @@ export default function App() {
   if (checking) {
     return (
       <View style={styles.center}>
-        <ActivityIndicator size="large" color="#2d5016" />
+        <ActivityIndicator size="large" color={EMERALD} />
       </View>
     );
   }
@@ -123,8 +142,12 @@ function Tracker({ user }) {
   const [newPin, setNewPin] = useState("");
   const [confirmPin, setConfirmPin] = useState("");
   const [busy, setBusy] = useState(false);
-  // the vendor's open premium request, or null
+  // the vendor's latest premium request, pending or recently rejected, or null
   const [request, setRequest] = useState(null);
+  // GCash payment details and prices from the database
+  const [payment, setPayment] = useState(null);
+  const [plan, setPlan] = useState("monthly");
+  const [reference, setReference] = useState("");
 
   // Load records and account from the phone, sync, and sync again on return
   useEffect(() => {
@@ -168,20 +191,21 @@ function Tracker({ user }) {
   const daysLeft = paidUntil ? Math.ceil((new Date(paidUntil) - new Date()) / 86400000) : 0;
   const username = (profile && profile.username) || user.user_metadata?.username || user.email;
 
-  // The short status shown in the tag next to the greeting
+  // The short status shown in the tag next to the title
   function tierLabel() {
     if (ownerPremium) return "Premium, owner";
     if (premium) return "Premium, " + daysLeft + (daysLeft === 1 ? " day" : " days");
     return "Free";
   }
 
-  // Open a screen, the account screen loads its forms and the open request
+  // Open a screen, the account screen loads its forms, the request, and payment details
   function openScreen(next) {
     setScreen(next);
     if (next === "account") {
       setEditUsername(username);
       setEditMarket((profile && profile.market_name) || "");
       loadRequest();
+      loadPayment();
     }
   }
 
@@ -189,7 +213,7 @@ function Tracker({ user }) {
   function askUpgrade() {
     confirmAction(
       "Premium feature",
-      "Premium is 99 pesos a month and adds withdrawals and personal expenses. See premium in your account?",
+      "Premium adds withdrawals and personal expenses, 99 pesos a month or 999 a year. See premium in your account?",
       "Open account",
       () => openScreen("account")
     );
@@ -305,14 +329,28 @@ function Tracker({ user }) {
 
   // ----- account -----
 
-  // Load the vendor's open premium request, if any
+  // Load the vendor's latest request, a pending one, or a rejection from the last week
   async function loadRequest() {
     const { data } = await supabase
       .from("premium_requests")
-      .select("id, created_at")
-      .eq("status", "pending")
+      .select("id, status, plan, amount, reference_number, note, created_at, closed_at")
+      .in("status", ["pending", "rejected"])
+      .order("created_at", { ascending: false })
+      .limit(1)
       .maybeSingle();
-    setRequest(data || null);
+    const weekAgo = Date.now() - 7 * 86400000;
+    const recent = data && (data.status === "pending"
+      || new Date(data.closed_at || data.created_at).getTime() > weekAgo);
+    setRequest(recent ? data : null);
+  }
+
+  // Load the GCash number, name, and prices set by the owner
+  async function loadPayment() {
+    const { data } = await supabase
+      .from("app_settings")
+      .select("gcash_number, gcash_name, monthly_price, annual_price, approval_note")
+      .single();
+    setPayment(data || null);
   }
 
   // Save a new username and market, needs internet
@@ -375,25 +413,40 @@ function Tracker({ user }) {
     notify("PIN changed", "Use your new PIN the next time you log in.");
   }
 
-  // Ask the owner for premium
-  async function requestPremium() {
-    setBusy(true);
-    const { error } = await supabase.rpc("request_premium");
-    setBusy(false);
-    if (error) {
-      notify("Could not send the request", "Check your internet and try again.");
+  // Send the GCash reference number for the owner to check and approve
+  async function sendForApproval() {
+    const digits = reference.replace(/\D/g, "");
+    if (digits.length < 8) {
+      notify("Reference number needed", "Type the reference number from your GCash receipt.");
       return;
     }
+    setBusy(true);
+    const { error } = await supabase.rpc("request_premium", {
+      chosen_plan: plan, reference: digits,
+    });
+    setBusy(false);
+    if (error) {
+      notify("Could not send", error.message.includes("reference_once")
+        ? "This reference number was already used. Check your GCash receipt."
+        : "Check your internet and try again.");
+      return;
+    }
+    setReference("");
     await loadRequest();
-    notify("Request sent", PAYMENT_NOTE);
+    notify("Sent for approval", (payment && payment.approval_note) || DEFAULT_APPROVAL);
   }
 
-  // Cancel an open premium request
+  // Cancel an open request, only meant for vendors who have not paid yet
   function cancelRequest() {
-    confirmAction("Cancel your premium request?", "You can request again anytime.", "Cancel request", async () => {
-      await supabase.rpc("cancel_premium_request");
-      setRequest(null);
-    });
+    confirmAction(
+      "Cancel your request?",
+      "Only cancel if you have not paid yet. You can send again anytime.",
+      "Cancel request",
+      async () => {
+        await supabase.rpc("cancel_premium_request");
+        setRequest(null);
+      }
+    );
   }
 
   // Log out, the session listener in App switches back to the login screen
@@ -479,9 +532,9 @@ function Tracker({ user }) {
     return (
       <View style={styles.upgradeCard}>
         <Text style={styles.upgradeTitle}>{message}</Text>
-        <Text style={styles.upgradePrice}>Premium, 99 pesos a month</Text>
-        <TouchableOpacity style={styles.primaryButton} onPress={() => openScreen("account")}>
-          <Text style={styles.primaryButtonText}>SEE PREMIUM</Text>
+        <Text style={styles.upgradePrice}>Premium, 99 pesos a month or 999 a year</Text>
+        <TouchableOpacity style={styles.premiumButton} onPress={() => openScreen("account")}>
+          <Text style={styles.premiumButtonText}>GET PREMIUM</Text>
         </TouchableOpacity>
       </View>
     );
@@ -577,10 +630,107 @@ function Tracker({ user }) {
     );
   }
 
+  // The premium card, status, then either the waiting request or the GCash payment form
+  function renderPremiumCard() {
+    const monthly = payment ? payment.monthly_price : 99;
+    const annual = payment ? payment.annual_price : 999;
+    const saving = monthly * 12 - annual;
+    const price = plan === "annual" ? annual : monthly;
+    const approval = (payment && payment.approval_note) || DEFAULT_APPROVAL;
+    const pending = request && request.status === "pending";
+    const rejected = request && request.status === "rejected";
+    return (
+      <View style={[styles.card, styles.premiumCard]}>
+        <Text style={styles.cardTitle}>Premium</Text>
+        {ownerPremium ? (
+          <Text style={styles.cardText}>
+            Owner premium is on. You can switch it off in the admin dashboard to see the free view.
+          </Text>
+        ) : premium ? (
+          <Text style={styles.cardText}>
+            Premium until {shortDate(paidUntil)}, {daysLeft} {daysLeft === 1 ? "day" : "days"} left.
+            You can add more time below.
+          </Text>
+        ) : (
+          <Text style={styles.cardText}>You are on the free plan.</Text>
+        )}
+        {!premium && PREMIUM_BENEFITS.map((b) => (
+          <Text key={b} style={styles.benefit}>{"\u2713  "}{b}</Text>
+        ))}
+
+        {!ownerPremium && pending && (
+          <View style={styles.waitBox}>
+            <Text style={styles.waitTitle}>Waiting for approval</Text>
+            <Text style={styles.waitText}>
+              {request.plan === "annual" ? "1 year" : "1 month"}, P {request.amount},
+              reference {request.reference_number}
+            </Text>
+            <Text style={styles.waitText}>Sent {shortDate(request.created_at)}. {approval}</Text>
+            <TouchableOpacity onPress={cancelRequest}>
+              <Text style={styles.linkText}>Cancel request</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {!ownerPremium && !pending && (
+          <View>
+            {rejected && (
+              <Text style={styles.rejectBox}>
+                Your last payment was not approved. {request.note} Check the reference number
+                on your GCash receipt and send it again.
+              </Text>
+            )}
+            <Text style={styles.stepTitle}>{premium ? "Add more time" : "Choose a plan"}</Text>
+            <View style={styles.planRow}>
+              {[
+                ["monthly", "Monthly", "P " + monthly, "30 days"],
+                ["annual", "Annual", "P " + annual, "1 year, save P " + saving],
+              ].map(([key, name, cost, detail]) => (
+                <TouchableOpacity
+                  key={key}
+                  style={[styles.planCard, plan === key && styles.planActive]}
+                  onPress={() => setPlan(key)}
+                >
+                  <Text style={[styles.planName, plan === key && styles.planTextActive]}>{name}</Text>
+                  <Text style={[styles.planPrice, plan === key && styles.planTextActive]}>{cost}</Text>
+                  <Text style={[styles.planDetail, plan === key && styles.planTextActive]}>{detail}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            {payment && payment.gcash_number ? (
+              <View style={styles.payBox}>
+                <Text style={styles.payStep}>1. Open GCash and send P {price} to</Text>
+                <Text style={styles.payNumber} selectable>{spacedNumber(payment.gcash_number)}</Text>
+                <Text style={styles.payName}>{payment.gcash_name}</Text>
+                <Text style={styles.payStep}>2. Type the reference number from your GCash receipt</Text>
+                <TextInput
+                  style={styles.input}
+                  value={reference}
+                  onChangeText={setReference}
+                  keyboardType="number-pad"
+                  placeholder="halimbawa, 1234 567 890123"
+                />
+                <Text style={styles.payStep}>3. Tap send. {approval}</Text>
+                <TouchableOpacity style={styles.premiumButton} onPress={sendForApproval} disabled={busy}>
+                  <Text style={styles.premiumButtonText}>I PAID, SEND FOR APPROVAL</Text>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              <Text style={styles.hint}>Payment details are loading. Check your internet if this stays.</Text>
+            )}
+          </View>
+        )}
+      </View>
+    );
+  }
+
   function renderAccount() {
     return (
       <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
         {renderHeader("Account")}
+
+        {renderPremiumCard()}
 
         <View style={styles.card}>
           <Text style={styles.cardTitle}>Profile</Text>
@@ -608,39 +758,6 @@ function Tracker({ user }) {
           <TouchableOpacity style={styles.primaryButton} onPress={changePin} disabled={busy}>
             <Text style={styles.primaryButtonText}>CHANGE PIN</Text>
           </TouchableOpacity>
-        </View>
-
-        <View style={[styles.card, styles.premiumCard]}>
-          <Text style={styles.cardTitle}>Premium</Text>
-          {ownerPremium ? (
-            <Text style={styles.cardText}>
-              Owner premium is on. You can switch it off in the admin dashboard to see the free view.
-            </Text>
-          ) : premium ? (
-            <Text style={styles.cardText}>
-              Premium until {shortDate(paidUntil)}, {daysLeft} {daysLeft === 1 ? "day" : "days"} left.
-              To add more time, contact the Tindahan owner.
-            </Text>
-          ) : (
-            <Text style={styles.cardText}>You are on the free plan. Premium is 99 pesos a month.</Text>
-          )}
-          {PREMIUM_BENEFITS.map((b) => (
-            <Text key={b} style={styles.benefit}>{"\u2713  "}{b}</Text>
-          ))}
-          {!premium && (request ? (
-            <View>
-              <Text style={styles.requestNote}>
-                Request sent {shortDate(request.created_at)}. {PAYMENT_NOTE}
-              </Text>
-              <TouchableOpacity onPress={cancelRequest}>
-                <Text style={styles.linkText}>Cancel request</Text>
-              </TouchableOpacity>
-            </View>
-          ) : (
-            <TouchableOpacity style={styles.premiumButton} onPress={requestPremium} disabled={busy}>
-              <Text style={styles.premiumButtonText}>REQUEST PREMIUM</Text>
-            </TouchableOpacity>
-          ))}
         </View>
 
         <TouchableOpacity style={styles.logoutButton} onPress={logout}>
@@ -675,124 +792,150 @@ function Tracker({ user }) {
 }
 
 // Styles, large text and big touch targets for elderly and low literacy users
-const GREEN = "#2d5016";
-const MANGO = "#f2b21b";
 const styles = StyleSheet.create({
   // the page fills the window, on a wide PC screen the app is a column in the middle
-  page: { flex: 1, backgroundColor: "#e8e2d5" },
-  container: { flex: 1, width: "100%", maxWidth: 560, alignSelf: "center", backgroundColor: "#f5f1e8" },
+  page: { flex: 1, backgroundColor: "#E2E8F0" },
+  container: { flex: 1, width: "100%", maxWidth: 560, alignSelf: "center", backgroundColor: PAGE },
   screen: { flex: 1 },
   body: { padding: 20, paddingTop: 40, paddingBottom: 40 },
-  center: { flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#f5f1e8" },
+  center: { flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: PAGE },
 
   headerRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 },
-  title: { fontSize: 32, fontWeight: "bold", color: GREEN, flexShrink: 1 },
-  greeting: { fontSize: 20, color: "#333", marginTop: 6 },
+  title: { fontSize: 32, fontWeight: "bold", color: SLATE, flexShrink: 1 },
+  greeting: { fontSize: 20, color: SLATE, marginTop: 6 },
   tagPremium: {
-    backgroundColor: MANGO, color: "#4d3500", fontWeight: "bold", fontSize: 14,
+    backgroundColor: INDIGO, color: "white", fontWeight: "bold", fontSize: 14,
     paddingVertical: 5, paddingHorizontal: 10, borderRadius: 6, overflow: "hidden", flexShrink: 0,
   },
   tagFree: {
-    backgroundColor: "#dfe3dd", color: "#4f5d52", fontWeight: "bold", fontSize: 14,
+    backgroundColor: LINE, color: MUTED, fontWeight: "bold", fontSize: 14,
     paddingVertical: 5, paddingHorizontal: 10, borderRadius: 6, overflow: "hidden", flexShrink: 0,
   },
   bannerDanger: {
-    backgroundColor: "#a93a26", color: "white", fontSize: 16, fontWeight: "bold",
+    backgroundColor: CRIMSON, color: "white", fontSize: 16, fontWeight: "bold",
     padding: 12, borderRadius: 10, marginTop: 12,
   },
 
-  label: { fontSize: 18, color: "#555", marginBottom: 6, marginTop: 14 },
-  hint: { fontSize: 15, color: "#777", marginTop: 12, marginBottom: 6 },
+  label: { fontSize: 18, color: MUTED, marginBottom: 6, marginTop: 14 },
+  hint: { fontSize: 15, color: MUTED, marginTop: 12, marginBottom: 6 },
   input: {
-    backgroundColor: "white", borderRadius: 10, padding: 14,
-    fontSize: 22, borderWidth: 1, borderColor: "#ccc",
+    backgroundColor: CARD, borderRadius: 10, padding: 14, color: SLATE,
+    fontSize: 22, borderWidth: 1, borderColor: LINE,
   },
 
   // four equal record type buttons in a two by two grid
   kindGrid: { flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between", marginTop: 20, rowGap: 10 },
   kindButton: {
     width: "48.5%", minHeight: 78, paddingVertical: 12, paddingHorizontal: 8,
-    borderRadius: 10, backgroundColor: "white", borderWidth: 2, borderColor: "#cfd4ce",
+    borderRadius: 10, backgroundColor: CARD, borderWidth: 2, borderColor: LINE,
     alignItems: "center", justifyContent: "center",
   },
-  kindLocked: { backgroundColor: "#eceeea", borderStyle: "dashed" },
-  kindActive_in: { backgroundColor: "#2e7d32", borderColor: "#2e7d32" },
-  kindActive_out: { backgroundColor: "#c62828", borderColor: "#c62828" },
-  kindActive_withdrawal: { backgroundColor: "#ef6c00", borderColor: "#ef6c00" },
-  kindActive_personal: { backgroundColor: "#6a1b9a", borderColor: "#6a1b9a" },
-  kindText: { fontSize: 19, fontWeight: "bold", color: "#333", textAlign: "center" },
-  kindNote: { fontSize: 13, color: "#666", marginTop: 3, textAlign: "center" },
+  kindLocked: { backgroundColor: "#F1F5F9", borderStyle: "dashed" },
+  kindActive_in: { backgroundColor: EMERALD, borderColor: EMERALD },
+  kindActive_out: { backgroundColor: CRIMSON, borderColor: CRIMSON },
+  kindActive_withdrawal: { backgroundColor: INDIGO, borderColor: INDIGO },
+  kindActive_personal: { backgroundColor: SLATE, borderColor: SLATE },
+  kindText: { fontSize: 19, fontWeight: "bold", color: SLATE, textAlign: "center" },
+  kindNote: { fontSize: 13, color: MUTED, marginTop: 3, textAlign: "center" },
   kindTextActive: { color: "white" },
 
-  saveButton: { marginTop: 26, backgroundColor: GREEN, padding: 20, borderRadius: 12, alignItems: "center" },
+  saveButton: { marginTop: 26, backgroundColor: EMERALD, padding: 20, borderRadius: 12, alignItems: "center" },
   saveText: { fontSize: 26, fontWeight: "bold", color: "white" },
 
-  syncOk: { fontSize: 15, color: "#2e7d32", marginTop: 8 },
-  syncBad: { fontSize: 15, color: "#e65100", marginTop: 8, fontWeight: "bold" },
+  syncOk: { fontSize: 15, color: EMERALD, marginTop: 8 },
+  syncBad: { fontSize: 15, color: CRIMSON, marginTop: 8, fontWeight: "bold" },
 
   // the business, personal, withdrawal switch at the top of the dashboard
-  tabBar: {
-    flexDirection: "row", marginTop: 16, backgroundColor: "#e8e2d5",
-    borderRadius: 10, padding: 4,
-  },
+  tabBar: { flexDirection: "row", marginTop: 16, backgroundColor: LINE, borderRadius: 10, padding: 4 },
   tabButton: { flex: 1, paddingVertical: 12, borderRadius: 8, alignItems: "center" },
-  tabActive: { backgroundColor: GREEN },
-  tabText: { fontSize: 14, fontWeight: "bold", color: "#555" },
+  tabActive: { backgroundColor: SLATE },
+  tabText: { fontSize: 14, fontWeight: "bold", color: MUTED },
   tabTextActive: { color: "white" },
 
   cashLeft: {
     flexDirection: "row", justifyContent: "space-between", alignItems: "center",
-    backgroundColor: "#fff8e1", borderLeftWidth: 6, borderLeftColor: MANGO,
+    backgroundColor: "#ECFDF5", borderLeftWidth: 6, borderLeftColor: EMERALD,
     borderRadius: 10, padding: 14, marginTop: 14,
   },
-  cashLeftLabel: { fontSize: 18, fontWeight: "bold", color: "#4d3500" },
+  cashLeftLabel: { fontSize: 18, fontWeight: "bold", color: SLATE },
 
   totalBox: {
-    backgroundColor: "white", borderRadius: 10, padding: 16, marginTop: 10,
+    backgroundColor: CARD, borderRadius: 10, padding: 16, marginTop: 10,
+    borderWidth: 1, borderColor: LINE,
     flexDirection: "row", justifyContent: "space-between", alignItems: "center",
   },
-  totalLabel: { fontSize: 19, color: "#333", flexShrink: 1 },
-  amountIn: { fontSize: 21, fontWeight: "bold", color: "#2e7d32" },
-  amountOut: { fontSize: 21, fontWeight: "bold", color: "#c62828" },
-  amountWithdrawal: { fontSize: 21, fontWeight: "bold", color: "#ef6c00" },
-  amountPersonal: { fontSize: 21, fontWeight: "bold", color: "#6a1b9a" },
+  totalLabel: { fontSize: 19, color: SLATE, flexShrink: 1 },
+  amountIn: { fontSize: 21, fontWeight: "bold", color: EMERALD },
+  amountOut: { fontSize: 21, fontWeight: "bold", color: CRIMSON },
+  amountWithdrawal: { fontSize: 21, fontWeight: "bold", color: INDIGO },
+  amountPersonal: { fontSize: 21, fontWeight: "bold", color: SLATE },
 
   recordRow: {
-    backgroundColor: "white", borderRadius: 8, padding: 14, marginBottom: 8,
+    backgroundColor: CARD, borderRadius: 8, padding: 14, marginBottom: 8,
+    borderWidth: 1, borderColor: LINE,
     flexDirection: "row", justifyContent: "space-between", alignItems: "center",
   },
   recordInfo: { flex: 1, marginRight: 10 },
-  recordText: { fontSize: 18, color: "#333" },
-  recordNote: { fontSize: 14, color: "#777" },
-  empty: { fontSize: 17, color: "#777", marginTop: 16 },
+  recordText: { fontSize: 18, color: SLATE },
+  recordNote: { fontSize: 14, color: MUTED },
+  empty: { fontSize: 17, color: MUTED, marginTop: 16 },
 
   upgradeCard: {
-    backgroundColor: "white", borderRadius: 12, padding: 18, marginTop: 14,
-    borderWidth: 2, borderColor: MANGO,
+    backgroundColor: CARD, borderRadius: 12, padding: 18, marginTop: 14,
+    borderWidth: 2, borderColor: INDIGO,
   },
-  upgradeTitle: { fontSize: 19, color: "#333", fontWeight: "bold" },
-  upgradePrice: { fontSize: 16, color: "#4d3500", marginTop: 6 },
+  upgradeTitle: { fontSize: 19, color: SLATE, fontWeight: "bold" },
+  upgradePrice: { fontSize: 16, color: INDIGO, marginTop: 6 },
 
-  card: { backgroundColor: "white", borderRadius: 12, padding: 18, marginTop: 16 },
-  premiumCard: { borderWidth: 2, borderColor: MANGO },
-  cardTitle: { fontSize: 22, fontWeight: "bold", color: GREEN },
-  cardText: { fontSize: 17, color: "#333", marginTop: 8, marginBottom: 6 },
-  benefit: { fontSize: 16, color: "#333", marginTop: 6 },
-  requestNote: { fontSize: 16, color: "#4d3500", marginTop: 14, backgroundColor: "#fff8e1", padding: 12, borderRadius: 8 },
-  linkText: { fontSize: 16, color: "#c62828", fontWeight: "bold", marginTop: 10 },
-  primaryButton: { marginTop: 16, backgroundColor: GREEN, padding: 16, borderRadius: 10, alignItems: "center" },
+  card: {
+    backgroundColor: CARD, borderRadius: 12, padding: 18, marginTop: 16,
+    borderWidth: 1, borderColor: LINE,
+  },
+  premiumCard: { borderWidth: 2, borderColor: INDIGO },
+  cardTitle: { fontSize: 22, fontWeight: "bold", color: SLATE },
+  cardText: { fontSize: 17, color: SLATE, marginTop: 8, marginBottom: 6 },
+  benefit: { fontSize: 16, color: SLATE, marginTop: 6 },
+  stepTitle: { fontSize: 18, fontWeight: "bold", color: SLATE, marginTop: 18 },
+
+  // the monthly and annual plan picker
+  planRow: { flexDirection: "row", gap: 10, marginTop: 10 },
+  planCard: {
+    flex: 1, borderWidth: 2, borderColor: LINE, borderRadius: 10,
+    padding: 12, alignItems: "center", backgroundColor: CARD,
+  },
+  planActive: { backgroundColor: INDIGO, borderColor: INDIGO },
+  planName: { fontSize: 16, fontWeight: "bold", color: SLATE },
+  planPrice: { fontSize: 24, fontWeight: "bold", color: SLATE, marginTop: 2 },
+  planDetail: { fontSize: 13, color: MUTED, marginTop: 2, textAlign: "center" },
+  planTextActive: { color: "white" },
+
+  // the GCash payment steps
+  payBox: { marginTop: 14, backgroundColor: "#EFF6FF", borderRadius: 10, padding: 14 },
+  payStep: { fontSize: 16, color: SLATE, marginTop: 10, marginBottom: 6 },
+  payNumber: { fontSize: 28, fontWeight: "bold", color: INDIGO, letterSpacing: 1 },
+  payName: { fontSize: 16, color: SLATE },
+  waitBox: { marginTop: 14, backgroundColor: "#EFF6FF", borderRadius: 10, padding: 14 },
+  waitTitle: { fontSize: 18, fontWeight: "bold", color: INDIGO },
+  waitText: { fontSize: 16, color: SLATE, marginTop: 6 },
+  rejectBox: {
+    fontSize: 16, color: "white", backgroundColor: CRIMSON,
+    padding: 12, borderRadius: 8, marginTop: 14,
+  },
+  linkText: { fontSize: 16, color: CRIMSON, fontWeight: "bold", marginTop: 12 },
+
+  primaryButton: { marginTop: 16, backgroundColor: EMERALD, padding: 16, borderRadius: 10, alignItems: "center" },
   primaryButtonText: { fontSize: 18, fontWeight: "bold", color: "white" },
-  premiumButton: { marginTop: 16, backgroundColor: MANGO, padding: 16, borderRadius: 10, alignItems: "center" },
-  premiumButtonText: { fontSize: 18, fontWeight: "bold", color: "#4d3500" },
+  premiumButton: { marginTop: 16, backgroundColor: INDIGO, padding: 16, borderRadius: 10, alignItems: "center" },
+  premiumButtonText: { fontSize: 18, fontWeight: "bold", color: "white" },
   logoutButton: {
     marginTop: 20, padding: 14, borderRadius: 10,
-    borderWidth: 2, borderColor: "#c62828", alignItems: "center",
+    borderWidth: 2, borderColor: CRIMSON, alignItems: "center",
   },
-  logoutText: { fontSize: 18, fontWeight: "bold", color: "#c62828" },
+  logoutText: { fontSize: 18, fontWeight: "bold", color: CRIMSON },
 
-  nav: { flexDirection: "row", borderTopWidth: 1, borderColor: "#ccc" },
-  navButton: { flex: 1, paddingVertical: 16, alignItems: "center", backgroundColor: "#e8e2d5" },
-  navActive: { backgroundColor: GREEN },
-  navText: { fontSize: 15, fontWeight: "bold", color: "#333" },
+  nav: { flexDirection: "row", borderTopWidth: 1, borderColor: LINE, backgroundColor: CARD },
+  navButton: { flex: 1, paddingVertical: 16, alignItems: "center" },
+  navActive: { backgroundColor: SLATE },
+  navText: { fontSize: 15, fontWeight: "bold", color: MUTED },
   navTextActive: { color: "white" },
 });
