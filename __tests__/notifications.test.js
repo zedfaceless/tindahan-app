@@ -5,18 +5,23 @@ function fakeNotifications() {
   const scheduled = [];
   const log = [];
   const perm = { granted: true };
+  const channels = {};
   return {
-    scheduled, log, perm,
+    scheduled, log, perm, channels,
     SchedulableTriggerInputTypes: { DATE: "date", TIME_INTERVAL: "timeInterval" },
-    AndroidImportance: { MAX: 5, HIGH: 4 },
+    AndroidImportance: { NONE: 2, HIGH: 6, MAX: 7 },
     setNotificationHandler: () => log.push("handler"),
-    setNotificationChannelAsync: async (id) => log.push("channel:" + id),
+    setNotificationChannelAsync: async (id, options) => { log.push("channel:" + id); channels[id] = { id, ...options }; },
+    getNotificationChannelAsync: async (id) => channels[id] || null,
+    getAllScheduledNotificationsAsync: async () => [...scheduled],
     getPermissionsAsync: async () => ({ ...perm }),
     requestPermissionsAsync: async () => ({ ...perm }),
     cancelAllScheduledNotificationsAsync: async () => { scheduled.length = 0; },
     scheduleNotificationAsync: async (req) => { scheduled.push(req); return req.identifier || "x"; },
   };
 }
+
+const linking = jest.fn(async () => {});
 
 // load lib/notifications fresh, as a given kind of app on a given phone
 function load(environment, os) {
@@ -27,7 +32,7 @@ function load(environment, os) {
   // otherwise a later test would still talk to an earlier test's fake phone
   jest.resetModules();
   jest.isolateModules(() => {
-    jest.doMock("react-native", () => ({ Platform: { OS: os } }));
+    jest.doMock("react-native", () => ({ Platform: { OS: os }, Linking: { openSettings: linking } }));
     jest.doMock("expo-constants", () => ({
       __esModule: true, default: { executionEnvironment: environment },
       ExecutionEnvironment: { StoreClient: "storeClient", Standalone: "standalone", Bare: "bare" },
@@ -55,6 +60,8 @@ describe("inside Expo Go on Android", () => {
     expect(await N.askPermission()).toBe(false);
     expect(await N.testReminder("u")).toBe(false);
     await N.notifyNow("Welcome", "hi");
+    expect(await N.sendNow("u")).toBe(false);
+    expect(await N.reminderHealth("u")).toEqual({ supported: false, reason: "expo-go" });
     expect(loaded.notifications).toBe(false);
   });
 });
@@ -111,5 +118,35 @@ describe("in the installed app", () => {
     await N.refreshReminders({ userId: "f", schedules: [kuryente], profile, premium: false });
     expect(notif.scheduled.length).toBeGreaterThan(0);
     expect(notif.scheduled.every((s) => s.identifier.startsWith("renewal_"))).toBe(true);
+  });
+
+  test("send now shows a notification at once, on the reminders channel, with no schedule", async () => {
+    expect(await N.sendNow("g")).toBe(true);
+    expect(notif.scheduled).toHaveLength(1);
+    expect(notif.scheduled[0].trigger).toEqual({ channelId: "tindahan-reminders" });
+    expect(notif.scheduled[0].content.title).toBe("Tindahan notification test");
+  });
+
+  test("the status check reports permission, the category, and how many reminders wait", async () => {
+    await N.refreshReminders({ userId: "h", schedules: [kuryente], profile, premium: true });
+    const health = await N.reminderHealth("h");
+    expect(health.waiting).toBeGreaterThan(0);
+    expect(health).toEqual({ supported: true, enabled: true, permission: true, categoryOn: true, waiting: notif.scheduled.length });
+  });
+
+  test("a category switched off in phone settings is reported as off", async () => {
+    await N.reminderHealth("i");
+    notif.channels["tindahan-reminders"].importance = notif.AndroidImportance.NONE;
+    expect((await N.reminderHealth("i")).categoryOn).toBe(false);
+  });
+
+  test("blocked notifications are reported as blocked", async () => {
+    notif.perm.granted = false;
+    expect((await N.reminderHealth("j")).permission).toBe(false);
+  });
+
+  test("the settings button opens Tindahan's page in phone settings", async () => {
+    await N.openPhoneSettings();
+    expect(linking).toHaveBeenCalled();
   });
 });

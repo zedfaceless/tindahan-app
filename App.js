@@ -28,6 +28,7 @@ import {
 import {
   alarmsSupported, alarmsUnavailable, readReminderSettings, saveReminderSettings,
   askPermission, refreshReminders, notifyNow, testReminder,
+  sendNow, reminderHealth, openPhoneSettings,
 } from "./lib/notifications";
 import { Ionicons } from "@expo/vector-icons";
 import { buildStatementHtml, statementRecords, periodFor, longDay, earliestStart, PREMIUM_MONTHS, MAX_MONTHS } from "./lib/statement";
@@ -179,6 +180,8 @@ function Tracker({ user }) {
   const [schedules, setSchedules] = useState([]);
   const [reminderSettings, setReminderSettings] = useState({ enabled: true, sound: true });
   const [alarmStatus, setAlarmStatus] = useState(null);
+  // what the phone itself says about Tindahan's notifications
+  const [health, setHealth] = useState(null);
   // shown once when the owner approves a premium payment
   const [welcome, setWelcome] = useState(false);
   // income statements, a free vendor's latest request, and a premium vendor's choices
@@ -291,6 +294,7 @@ function Tracker({ user }) {
       loadRequest();
       loadPayment();
       readReminderSettings(user.id).then(setReminderSettings);
+      loadHealth();
     }
   }
 
@@ -662,6 +666,25 @@ function Tracker({ user }) {
       sent ? "A test reminder will appear in 5 seconds."
         : "Allow notifications for Tindahan in your phone settings to get reminders.");
     resetAlarms(schedules, profile);
+    loadHealth();
+  }
+
+  // Show a notification right now, with no scheduling, to see if the phone shows Tindahan at all
+  async function sendTestNow() {
+    const sent = await sendNow(user.id);
+    if (!sent) {
+      notify("Notifications are off", "Allow notifications for Tindahan in your phone settings to get reminders.");
+    }
+    loadHealth();
+  }
+
+  // Read what the phone says about Tindahan's notifications
+  async function loadHealth() {
+    try {
+      setHealth(await reminderHealth(user.id));
+    } catch (error) {
+      setHealth(null);
+    }
   }
 
   // What the reminder settings card says about the alarms
@@ -1176,9 +1199,40 @@ function Tracker({ user }) {
           </TouchableOpacity>
         ))}
         <Text style={styles.hint}>{alarmLabel()}</Text>
-        <TouchableOpacity style={styles.outlineButton} onPress={sendTest}>
-          <Text style={styles.outlineButtonText}>SEND A TEST REMINDER</Text>
+        {health && health.supported && (
+          <View style={styles.healthBox}>
+            <Text style={health.permission ? styles.healthGood : styles.healthBad}>
+              {health.permission ? "Notifications allowed" : "Notifications blocked in phone settings"}
+            </Text>
+            {health.categoryOn !== null && (
+              <Text style={health.categoryOn ? styles.healthGood : styles.healthBad}>
+                {health.categoryOn ? "Bill reminders category on" : "Bill reminders category switched off"}
+              </Text>
+            )}
+            <Text style={styles.healthText}>
+              {health.waiting} {health.waiting === 1 ? "reminder" : "reminders"} waiting on this phone
+            </Text>
+          </View>
+        )}
+        <TouchableOpacity style={styles.outlineButton} onPress={sendTestNow}>
+          <Text style={styles.outlineButtonText}>SEND A NOTIFICATION NOW</Text>
         </TouchableOpacity>
+        <TouchableOpacity style={styles.outlineButton} onPress={sendTest}>
+          <Text style={styles.outlineButtonText}>SEND A TEST REMINDER IN 5 SECONDS</Text>
+        </TouchableOpacity>
+        {Platform.OS === "android" && (
+          <View style={styles.phoneTips}>
+            <Text style={styles.phoneTipsTitle}>Hindi tumutunog? Reminders not ringing?</Text>
+            <Text style={styles.phoneTipsText}>
+              On Xiaomi, Redmi, and POCO phones, open Tindahan's settings and turn on Autostart,
+              set Battery saver to No restrictions, allow Floating and Lock screen notifications,
+              and allow Alarms and reminders.
+            </Text>
+            <TouchableOpacity style={styles.outlineButton} onPress={() => openPhoneSettings()}>
+              <Text style={styles.outlineButtonText}>OPEN TINDAHAN PHONE SETTINGS</Text>
+            </TouchableOpacity>
+          </View>
+        )}
       </View>
     );
   }
@@ -1571,6 +1625,13 @@ function makeStyles(c) {
     borderWidth: 2, borderColor: INDIGO,
   },
   outlineButtonText: { fontSize: 16, fontWeight: "bold", color: c.accent },
+  healthBox: { marginTop: 10, backgroundColor: c.subtle, borderRadius: 8, padding: 12, gap: 4 },
+  healthGood: { fontSize: 15, fontWeight: "bold", color: c.good },
+  healthBad: { fontSize: 15, fontWeight: "bold", color: c.bad },
+  healthText: { fontSize: 15, color: c.text },
+  phoneTips: { marginTop: 16, borderTopWidth: 1, borderColor: c.line, paddingTop: 12 },
+  phoneTipsTitle: { fontSize: 16, fontWeight: "bold", color: c.text },
+  phoneTipsText: { fontSize: 14, color: c.muted, marginTop: 4 },
 
   // the welcome to premium screen
   welcomeOverlay: {

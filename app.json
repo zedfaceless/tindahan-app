@@ -15,7 +15,10 @@
         "backgroundColor": "#1E293B"
       },
       "package": "com.zedfaceless.tindahan",
-      "versionCode": 1
+      "versionCode": 1,
+      "permissions": [
+        "android.permission.SCHEDULE_EXACT_ALARM"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
