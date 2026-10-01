@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024"><defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#26354D"/>
+      <stop offset="1" stop-color="#1E293B"/>
+    </linearGradient>
+  </defs><rect width="1024" height="1024" rx="230" fill="url(#bg)"/><!-- roof bar -->
+  <rect x="197" y="228" width="630" height="44" rx="22" fill="#F8FAFC"/>
+
+  <!-- awning stripes: emerald / light / emerald / light / emerald -->
+  <g>
+    <path d="M212 272 H332 V400 A60 60 0 0 1 212 400 Z" fill="#059669"/>
+    <path d="M332 272 H452 V400 A60 60 0 0 1 332 400 Z" fill="#F8FAFC"/>
+    <path d="M452 272 H572 V400 A60 60 0 0 1 452 400 Z" fill="#059669"/>
+    <path d="M572 272 H692 V400 A60 60 0 0 1 572 400 Z" fill="#F8FAFC"/>
+    <path d="M692 272 H812 V400 A60 60 0 0 1 692 400 Z" fill="#059669"/>
+  </g>
+
+  <!-- growth bars inside the stall -->
+  <rect x="302" y="664" width="110" height="136" rx="18" fill="#059669"/>
+  <rect x="457" y="588" width="110" height="212" rx="18" fill="#059669"/>
+  <rect x="612" y="512" width="110" height="288" rx="18" fill="#2563EB"/>
+
+  <!-- counter -->
+  <rect x="237" y="800" width="550" height="36" rx="18" fill="#F8FAFC"/>
+</svg>

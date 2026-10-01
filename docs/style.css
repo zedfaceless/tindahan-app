@@ -1,0 +1,20 @@
+/* Tindahan legal pages, light and dark, readable on any phone */
+:root { --ink: #1e293b; --muted: #64748b; --page: #f8fafc; --card: #ffffff; --line: #e2e8f0; --accent: #2563eb; --good: #059669; --bad: #dc2626; }
+@media (prefers-color-scheme: dark) {
+  :root { --ink: #f8fafc; --muted: #94a3b8; --page: #1e293b; --card: #0f172a; --line: #334155; --accent: #60a5fa; --good: #34d399; --bad: #f87171; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page); color: var(--ink); font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-size: 17px; line-height: 1.6; }
+main { max-width: 760px; margin: 0 auto; padding: 28px 20px 60px; }
+header { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+header img { width: 48px; height: 48px; border-radius: 12px; }
+header strong { font-size: 1.5rem; letter-spacing: -0.01em; }
+h1 { font-size: 1.9rem; line-height: 1.2; margin: 18px 0 4px; }
+h2 { font-size: 1.2rem; margin: 30px 0 6px; }
+p, li { margin: 0 0 10px; }
+ul { padding-left: 22px; }
+.muted { color: var(--muted); }
+.summary { background: var(--card); border: 1px solid var(--line); border-left: 5px solid var(--good); border-radius: 10px; padding: 14px 18px; margin: 18px 0; }
+.warning { background: var(--card); border: 1px solid var(--line); border-left: 5px solid var(--bad); border-radius: 10px; padding: 14px 18px; margin: 18px 0; }
+a { color: var(--accent); font-weight: 600; }
+nav { margin-top: 36px; padding-top: 16px; border-top: 1px solid var(--line); display: flex; gap: 18px; flex-wrap: wrap; }

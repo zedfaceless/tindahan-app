@@ -48,6 +48,7 @@ const supabase = {
   from(name) {
     return {
       select() { return new Query(name); },
+      update() { return { eq: async () => ({ error: null }) }; },
       async upsert(rows) {
         if (!net.online) return { error: new Error("offline") };
         // the whole batch is refused if any row breaks a rule, like the real database
@@ -68,7 +69,11 @@ const supabase = {
     };
   },
   rpc: jest.fn(async () => ({ data: null, error: null })),
-  auth: { startAutoRefresh() {}, stopAutoRefresh() {} },
+  auth: {
+    startAutoRefresh() {}, stopAutoRefresh() {},
+    signUp: jest.fn(async () => ({ data: { user: { id: "new-user" } }, error: null })),
+    signInWithPassword: jest.fn(async () => ({ data: {}, error: null })),
+  },
 };
 
 module.exports = { supabase, tables, account, net, reset };

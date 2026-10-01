@@ -5,8 +5,9 @@
 import { useState, useMemo } from "react";
 import {
   StyleSheet, Text, TextInput, TouchableOpacity,
-  ActivityIndicator, ScrollView, Image,
+  ActivityIndicator, ScrollView, Image, View, Linking,
 } from "react-native";
+import { PRIVACY_URL, TERMS_URL } from "./lib/legal";
 import { useTheme, EMERALD } from "./lib/theme";
 import { supabase } from "./lib/supabase";
 import { notify } from "./lib/notify";
@@ -18,12 +19,18 @@ export default function AuthScreen() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [fullName, setFullName] = useState("");
+  // registration needs the vendor to confirm age and agree to the terms
+  const [agreed, setAgreed] = useState(false);
   const [username, setUsername] = useState("");
   const [marketName, setMarketName] = useState("");
   const [busy, setBusy] = useState(false);
 
   // Check every registration field before talking to the server
   function validRegistration(cleanEmail, cleanUser, cleanMarket, cleanFull) {
+    if (!agreed) {
+      notify("Please agree first", "Tick the box to confirm you are 18 or older and agree to the Terms of Service and Privacy Policy.");
+      return false;
+    }
     if (cleanFull.length < 2) {
       notify("Full name needed", "Please type your full name, like Juana Dela Cruz.");
       return false;
@@ -185,6 +192,26 @@ export default function AuthScreen() {
         placeholder="******"
       />
 
+      {registering && (
+        <View style={styles.agreeRow}>
+          <TouchableOpacity
+            style={[styles.agreeBox, agreed && styles.agreeBoxOn]}
+            onPress={() => setAgreed(!agreed)}
+            accessibilityRole="checkbox"
+            accessibilityState={{ checked: agreed }}
+            accessibilityLabel="I am 18 or older and agree to the Terms of Service and Privacy Policy"
+          >
+            {agreed && <Text style={styles.agreeMark}>{"\u2713"}</Text>}
+          </TouchableOpacity>
+          <Text style={styles.agreeText}>
+            I am 18 or older and I agree to the{" "}
+            <Text style={styles.agreeLink} onPress={() => Linking.openURL(TERMS_URL)}>Terms of Service</Text>
+            {" "}and the{" "}
+            <Text style={styles.agreeLink} onPress={() => Linking.openURL(PRIVACY_URL)}>Privacy Policy</Text>.
+          </Text>
+        </View>
+      )}
+
       <TouchableOpacity
         style={styles.mainButton}
         onPress={registering ? register : login}
@@ -206,6 +233,10 @@ export default function AuthScreen() {
       <Text style={styles.notice}>
         Tindahan records how the app is used to improve it. Only the app owner sees this.
       </Text>
+      <View style={styles.footerLinks}>
+        <Text style={styles.footerLink} onPress={() => Linking.openURL(TERMS_URL)}>Terms of Service</Text>
+        <Text style={styles.footerLink} onPress={() => Linking.openURL(PRIVACY_URL)}>Privacy Policy</Text>
+      </View>
     </ScrollView>
   );
 }
@@ -233,5 +264,16 @@ function makeStyles(c) {
     mainText: { fontSize: 24, fontWeight: "bold", color: "white" },
     switchText: { fontSize: 18, color: c.accent, textAlign: "center", marginTop: 20 },
     notice: { fontSize: 14, color: c.muted, textAlign: "center", marginTop: 30 },
+    agreeRow: { flexDirection: "row", alignItems: "flex-start", gap: 12, marginTop: 20 },
+    agreeBox: {
+      width: 30, height: 30, borderRadius: 6, borderWidth: 2, borderColor: c.text,
+      alignItems: "center", justifyContent: "center", marginTop: 2,
+    },
+    agreeBoxOn: { backgroundColor: EMERALD, borderColor: EMERALD },
+    agreeMark: { color: "white", fontSize: 18, fontWeight: "bold" },
+    agreeText: { flex: 1, fontSize: 15, color: c.text, lineHeight: 22 },
+    agreeLink: { color: c.accent, fontWeight: "bold", textDecorationLine: "underline" },
+    footerLinks: { flexDirection: "row", justifyContent: "center", gap: 24, marginTop: 14, marginBottom: 20 },
+    footerLink: { fontSize: 14, color: c.accent, fontWeight: "bold" },
   });
 }

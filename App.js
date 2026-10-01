@@ -15,8 +15,10 @@
 import { useState, useEffect, useMemo } from "react";
 import {
   StyleSheet, Text, View, TextInput, TouchableOpacity, ScrollView,
-  SafeAreaView, ActivityIndicator, AppState, Platform, Image, StatusBar,
+  SafeAreaView, ActivityIndicator, AppState, Platform, Image, StatusBar, Linking,
 } from "react-native";
+import * as Application from "expo-application";
+import { PRIVACY_URL, TERMS_URL, PLAY_BUILD } from "./lib/legal";
 import { ThemeProvider, useTheme, EMERALD, INDIGO, CRIMSON } from "./lib/theme";
 import { supabase } from "./lib/supabase";
 import { notify, confirmAction } from "./lib/notify";
@@ -182,6 +184,10 @@ function Tracker({ user }) {
   const [alarmStatus, setAlarmStatus] = useState(null);
   // what the phone itself says about Tindahan's notifications
   const [health, setHealth] = useState(null);
+  // deleting the account, opened with a button and confirmed by typing DELETE
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleteText, setDeleteText] = useState("");
+  const [deleting, setDeleting] = useState(false);
   // shown once when the owner approves a premium payment
   const [welcome, setWelcome] = useState(false);
   // income statements, a free vendor's latest request, and a premium vendor's choices
@@ -302,7 +308,9 @@ function Tracker({ user }) {
   function askUpgrade() {
     confirmAction(
       "Premium feature",
-      "Premium lets you track personal money too, 99 pesos a month or 999 a year. See premium in your account?",
+      PLAY_BUILD
+        ? "Premium lets you track personal money too. Premium is coming soon to the Google Play version. See premium in your account?"
+        : "Premium lets you track personal money too, 99 pesos a month or 999 a year. See premium in your account?",
       "Open account",
       () => openScreen("account")
     );
@@ -696,6 +704,46 @@ function Tracker({ user }) {
     return alarmStatus.count + (alarmStatus.count === 1 ? " reminder" : " reminders") + " set for the next 30 days.";
   }
 
+  // Delete the account and every piece of its data, as Google Play requires.
+  // Screenshots first through the storage API, then the account on the server,
+  // then this phone's copy and alarms, then sign out.
+  async function deleteAccount() {
+    if (deleteText.trim().toUpperCase() !== "DELETE") {
+      notify("Type DELETE to confirm", "To delete your account, type the word DELETE in the box.");
+      return;
+    }
+    setDeleting(true);
+    try {
+      const folder = await supabase.storage.from("ticket-screenshots").list(user.id, { limit: 1000 });
+      if (folder.data && folder.data.length > 0) {
+        await supabase.storage.from("ticket-screenshots").remove(folder.data.map((f) => user.id + "/" + f.name));
+      }
+      const { error } = await supabase.rpc("delete_my_account");
+      if (error) throw error;
+      try {
+        await refreshReminders({ userId: user.id, schedules: [], profile: null, premium: false });
+      } catch (alarmError) {
+        // alarms are optional, the account is already deleted
+      }
+      const keys = await AsyncStorage.getAllKeys();
+      await AsyncStorage.multiRemove(keys.filter((k) => k.includes(user.id)));
+      notify("Account deleted", "Your Tindahan account and all of its data have been deleted. Salamat.");
+      await supabase.auth.signOut().catch(() => {});
+    } catch (error) {
+      notify("Could not delete the account", "Check your internet and try again. " + String((error && error.message) || ""));
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  // Which version and build this is, so it is always clear what is installed
+  function versionLabel() {
+    const version = Application.nativeApplicationVersion;
+    const build = Application.nativeBuildVersion;
+    if (!version) return "Tindahan web";
+    return "Tindahan " + version + (build ? ", build " + build : "") + (PLAY_BUILD ? ", Google Play" : ", direct install");
+  }
+
   // Log out, the session listener in App switches back to the login screen
   function logout() {
     confirmAction(
@@ -799,7 +847,7 @@ function Tracker({ user }) {
     return (
       <View style={styles.upgradeCard}>
         <Text style={styles.upgradeTitle}>{message}</Text>
-        <Text style={styles.upgradePrice}>Premium, 99 pesos a month or 999 a year</Text>
+        <Text style={styles.upgradePrice}>{PLAY_BUILD ? "Premium, coming soon" : "Premium, 99 pesos a month or 999 a year"}</Text>
         <TouchableOpacity style={styles.premiumButton} onPress={() => openScreen("account")}>
           <Text style={styles.premiumButtonText}>GET PREMIUM</Text>
         </TouchableOpacity>
@@ -1038,7 +1086,9 @@ function Tracker({ user }) {
 
         {!premium && (
           <TouchableOpacity style={styles.upgradeHint} onPress={() => openScreen("account")}>
-            <Text style={styles.upgradeHintText}>Track personal money too with Premium, 99 pesos a month.</Text>
+            <Text style={styles.upgradeHintText}>
+              {PLAY_BUILD ? "Track personal money too with Premium, coming soon." : "Track personal money too with Premium, 99 pesos a month."}
+            </Text>
           </TouchableOpacity>
         )}
 
@@ -1066,7 +1116,7 @@ function Tracker({ user }) {
         ) : premium ? (
           <Text style={styles.cardText}>
             Premium until {shortDate(paidUntil)}, {daysLeft} {daysLeft === 1 ? "day" : "days"} left.
-            You can add more time below.
+            {PLAY_BUILD ? "" : " You can add more time below."}
           </Text>
         ) : (
           <Text style={styles.cardText}>You are on the free plan.</Text>
@@ -1075,7 +1125,13 @@ function Tracker({ user }) {
           <Text key={b} style={styles.benefit}>{"\u2713  "}{b}</Text>
         ))}
 
-        {!ownerPremium && pending && (
+        {PLAY_BUILD && !ownerPremium && (
+          <Text style={styles.playNote}>
+            Premium is coming soon to the Google Play version of Tindahan.
+          </Text>
+        )}
+
+        {!PLAY_BUILD && !ownerPremium && pending && (
           <View style={styles.waitBox}>
             <Text style={styles.waitTitle}>Waiting for approval</Text>
             <Text style={styles.waitText}>
@@ -1089,7 +1145,7 @@ function Tracker({ user }) {
           </View>
         )}
 
-        {!ownerPremium && !pending && (
+        {!PLAY_BUILD && !ownerPremium && !pending && (
           <View>
             {rejected && (
               <Text style={styles.rejectBox}>
@@ -1358,6 +1414,49 @@ function Tracker({ user }) {
         <TouchableOpacity style={styles.logoutButton} onPress={logout}>
           <Text style={styles.logoutText}>LOG OUT</Text>
         </TouchableOpacity>
+
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>Privacy and your account</Text>
+          <TouchableOpacity onPress={() => Linking.openURL(TERMS_URL)}>
+            <Text style={styles.legalLink}>Terms of Service</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => Linking.openURL(PRIVACY_URL)}>
+            <Text style={styles.legalLink}>Privacy Policy</Text>
+          </TouchableOpacity>
+          {profile && (profile.role === "owner" || profile.role === "admin") ? (
+            <Text style={styles.hint}>Staff accounts cannot be deleted from the app.</Text>
+          ) : !deleteOpen ? (
+            <TouchableOpacity style={styles.deleteButton} onPress={() => setDeleteOpen(true)}>
+              <Text style={styles.deleteButtonText}>DELETE MY ACCOUNT</Text>
+            </TouchableOpacity>
+          ) : (
+            <View style={styles.deleteBox}>
+              <Text style={styles.deleteWarning}>
+                This deletes your account and everything in it, your records, schedules,
+                statements, payment requests, and help tickets. It cannot be undone.
+                Download any statement you need first.
+              </Text>
+              <Text style={styles.label}>Type DELETE to confirm</Text>
+              <TextInput
+                placeholderTextColor={colors.muted}
+                keyboardAppearance={theme === "abyss" ? "dark" : "light"}
+                style={styles.input}
+                value={deleteText}
+                onChangeText={setDeleteText}
+                autoCapitalize="characters"
+                placeholder="DELETE"
+              />
+              <TouchableOpacity style={styles.deleteConfirm} onPress={deleteAccount} disabled={deleting}>
+                <Text style={styles.deleteConfirmText}>{deleting ? "DELETING..." : "DELETE MY ACCOUNT FOREVER"}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={() => { setDeleteOpen(false); setDeleteText(""); }}>
+                <Text style={styles.legalLink}>Cancel</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+        </View>
+
+        <Text style={styles.versionText}>{versionLabel()}</Text>
       </ScrollView>
     );
   }
@@ -1632,6 +1731,15 @@ function makeStyles(c) {
   phoneTips: { marginTop: 16, borderTopWidth: 1, borderColor: c.line, paddingTop: 12 },
   phoneTipsTitle: { fontSize: 16, fontWeight: "bold", color: c.text },
   phoneTipsText: { fontSize: 14, color: c.muted, marginTop: 4 },
+  playNote: { fontSize: 15, color: c.accent, marginTop: 14, backgroundColor: c.accentSoft, padding: 12, borderRadius: 8 },
+  legalLink: { fontSize: 16, color: c.accent, fontWeight: "bold", marginTop: 12 },
+  deleteButton: { marginTop: 18, padding: 14, borderRadius: 10, borderWidth: 2, borderColor: CRIMSON, alignItems: "center" },
+  deleteButtonText: { fontSize: 16, fontWeight: "bold", color: c.bad },
+  deleteBox: { marginTop: 16, backgroundColor: c.badSoft, borderRadius: 10, padding: 14 },
+  deleteWarning: { fontSize: 15, color: c.bad, fontWeight: "bold" },
+  deleteConfirm: { marginTop: 14, backgroundColor: CRIMSON, padding: 15, borderRadius: 10, alignItems: "center" },
+  deleteConfirmText: { fontSize: 16, fontWeight: "bold", color: "white" },
+  versionText: { fontSize: 13, color: c.muted, textAlign: "center", marginTop: 20, marginBottom: 10 },
 
   // the welcome to premium screen
   welcomeOverlay: {
