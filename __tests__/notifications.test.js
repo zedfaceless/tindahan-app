@@ -17,6 +17,10 @@ function fakeNotifications() {
     getPermissionsAsync: async () => ({ ...perm }),
     requestPermissionsAsync: async () => ({ ...perm }),
     cancelAllScheduledNotificationsAsync: async () => { scheduled.length = 0; },
+    cancelScheduledNotificationAsync: async (id) => {
+      const i = scheduled.findIndex((x) => x.identifier === id);
+      if (i >= 0) scheduled.splice(i, 1);
+    },
     scheduleNotificationAsync: async (req) => { scheduled.push(req); return req.identifier || "x"; },
   };
 }
@@ -148,5 +152,20 @@ describe("in the installed app", () => {
   test("the settings button opens Tindahan's page in phone settings", async () => {
     await N.openPhoneSettings();
     expect(linking).toHaveBeenCalled();
+  });
+
+  test("a test reminder survives the reminder refresh that follows it, the bug found on a real phone", async () => {
+    expect(await N.testReminder("k")).toBe(true);
+    await N.refreshReminders({ userId: "k", schedules: [kuryente], profile, premium: true });
+    const ids = notif.scheduled.map((x) => x.identifier || "");
+    expect(ids.some((id) => id.startsWith("test_"))).toBe(true);
+    expect(ids.some((id) => id.startsWith("k1_"))).toBe(true);
+  });
+
+  test("a refresh still removes old schedule reminders that no longer apply", async () => {
+    await N.refreshReminders({ userId: "l", schedules: [kuryente], profile, premium: true });
+    expect(notif.scheduled.some((x) => x.identifier.startsWith("k1_"))).toBe(true);
+    await N.refreshReminders({ userId: "l", schedules: [], profile, premium: true });
+    expect(notif.scheduled.some((x) => (x.identifier || "").startsWith("k1_"))).toBe(false);
   });
 });
