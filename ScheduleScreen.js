@@ -1,31 +1,27 @@
 // ScheduleScreen.js
 // Premium schedules. Vendors set up their own bills and expected payments,
-// kuryente, stall rent, a supplier, with a due date, a reminder time, and an
-// optional daily, weekly, or monthly repeat. Tapping Paid adds the money record
-// automatically and moves a repeating schedule to its next due date.
+// kuryente, stall rent, a supplier, school fees, with a due date, a reminder time,
+// and an optional daily, weekly, or monthly repeat. Each schedule is business or
+// personal money, in or out. Tapping Paid adds the money record automatically
+// and moves a repeating schedule to its next due date.
 
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { StyleSheet, Text, View, TextInput, TouchableOpacity, Platform } from "react-native";
 import { notify, confirmAction } from "./lib/notify";
 import { updateLocal, updateSchedules, newId, nowIso } from "./lib/sync";
 import { nextDueDate, daysUntilDue, parseDay, dayString, addDays } from "./lib/reminders";
+import { useTheme, EMERALD, INDIGO, CRIMSON } from "./lib/theme";
 
-const SLATE = "#1E293B";
-const CARD = "#FFFFFF";
-const LINE = "#E2E8F0";
-const MUTED = "#64748B";
-const EMERALD = "#059669";
-const INDIGO = "#2563EB";
-const CRIMSON = "#DC2626";
 
-// The four record types a schedule can create when paid
-const TYPES = [
-  ["out", "Money out"],
-  ["in", "Money in"],
-  ["withdrawal", "Withdrawal"],
-  ["personal", "Personal"],
-];
-const TYPE_LABEL = { out: "money out", in: "money in", withdrawal: "withdrawal", personal: "personal expense" };
+// Whose money, and which way it goes, when the schedule is paid
+const SCOPE_CHIPS = [["business", "Negosyo"], ["personal", "Personal"]];
+const KIND_CHIPS = [["out", "Money out"], ["in", "Money in"]];
+
+// "negosyo, money out" or "personal, money in"
+function typeLabel(schedule) {
+  return (schedule.scope === "personal" ? "personal" : "negosyo") + ", "
+    + (schedule.kind === "in" ? "money in" : "money out");
+}
 const REPEAT_LABEL = { daily: "Daily", weekly: "Weekly", monthly: "Monthly" };
 
 // What each repeat means, shown under the form so vendors know what to expect
@@ -67,12 +63,14 @@ function dueWords(schedule) {
 // A blank form, due today at 7 AM, no repeat
 function emptyForm() {
   return {
-    id: null, title: "", amount: "", kind: "out",
+    id: null, title: "", amount: "", scope: "business", kind: "out",
     due: dayString(new Date()), time: "07:00", repeats: false, repeat: "monthly",
   };
 }
 
 export default function ScheduleScreen({ user, schedules, onSchedules, onRecords, afterChange, header, upgrade, premium }) {
+  const { colors, mode: theme } = useTheme();
+  const styles = useMemo(() => makeStyles(colors), [colors]);
   const [form, setForm] = useState(null);
   const [paying, setPaying] = useState(null);
   const [payAmount, setPayAmount] = useState("");
@@ -114,7 +112,7 @@ export default function ScheduleScreen({ user, schedules, onSchedules, onRecords
     }
     setForm({
       id: schedule.id, title: schedule.title, amount: String(schedule.amount),
-      kind: schedule.kind, due: schedule.due_date, time: schedule.remind_time,
+      scope: schedule.scope, kind: schedule.kind, due: schedule.due_date, time: schedule.remind_time,
       repeats: schedule.repeat !== "none",
       repeat: schedule.repeat === "none" ? "monthly" : schedule.repeat,
     });
@@ -136,6 +134,7 @@ export default function ScheduleScreen({ user, schedules, onSchedules, onRecords
       id: form.id || newId(),
       title: title,
       amount: amount,
+      scope: form.scope,
       kind: form.kind,
       due_date: form.due,
       anchor_day: parseDay(form.due).getDate(),
@@ -173,6 +172,7 @@ export default function ScheduleScreen({ user, schedules, onSchedules, onRecords
     const record = {
       id: newId(),
       record_date: dayString(new Date()),
+      scope: schedule.scope,
       kind: schedule.kind,
       amount: amount,
       description: schedule.title,
@@ -195,7 +195,7 @@ export default function ScheduleScreen({ user, schedules, onSchedules, onRecords
     afterChange();
     notify(
       "Paid, bayad na",
-      pesos(amount) + " " + TYPE_LABEL[schedule.kind] + " added to today's records."
+      pesos(amount) + ", " + typeLabel(schedule) + ", added to today's records."
         + (next ? " Next due " + longDate(next) + "." : "")
     );
   }
@@ -224,6 +224,8 @@ export default function ScheduleScreen({ user, schedules, onSchedules, onRecords
 
         <Text style={styles.label}>Para saan, what is it for</Text>
         <TextInput
+            placeholderTextColor={colors.muted}
+            keyboardAppearance={theme === "abyss" ? "dark" : "light"}
           style={styles.input}
           value={form.title}
           onChangeText={(v) => change("title", v)}
@@ -232,6 +234,8 @@ export default function ScheduleScreen({ user, schedules, onSchedules, onRecords
 
         <Text style={styles.label}>Halaga, amount</Text>
         <TextInput
+            placeholderTextColor={colors.muted}
+            keyboardAppearance={theme === "abyss" ? "dark" : "light"}
           style={styles.input}
           value={form.amount}
           onChangeText={(v) => change("amount", v)}
@@ -239,12 +243,24 @@ export default function ScheduleScreen({ user, schedules, onSchedules, onRecords
           placeholder="0.00"
         />
 
-        <Text style={styles.label}>When paid, add it as</Text>
+        <Text style={styles.label}>Para saan, whose money</Text>
         <View style={styles.chipRow}>
-          {TYPES.map(([key, label]) => (
+          {SCOPE_CHIPS.map(([key, label]) => (
             <TouchableOpacity
               key={key}
-              style={[styles.chip, form.kind === key && styles.chipActive]}
+              style={[styles.chip, styles.chipWide, form.scope === key && styles.chipActive]}
+              onPress={() => change("scope", key)}
+            >
+              <Text style={[styles.chipText, form.scope === key && styles.chipTextActive]}>{label}</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+        <Text style={styles.label}>When paid, add it as</Text>
+        <View style={styles.chipRow}>
+          {KIND_CHIPS.map(([key, label]) => (
+            <TouchableOpacity
+              key={key}
+              style={[styles.chip, styles.chipWide, form.kind === key && styles.chipActive]}
               onPress={() => change("kind", key)}
             >
               <Text style={[styles.chipText, form.kind === key && styles.chipTextActive]}>{label}</Text>
@@ -318,13 +334,15 @@ export default function ScheduleScreen({ user, schedules, onSchedules, onRecords
         </Text>
         <Text style={styles.meta}>
           {s.repeat === "none" ? "One time" : "Repeats " + s.repeat}, reminder at {timeLabel(s.remind_time)},
-          adds as {TYPE_LABEL[s.kind]}
+          adds as {typeLabel(s)}
         </Text>
 
         {paying === s.id ? (
           <View style={styles.payBox}>
             <Text style={styles.label}>How much was paid, pwedeng palitan</Text>
             <TextInput
+            placeholderTextColor={colors.muted}
+            keyboardAppearance={theme === "abyss" ? "dark" : "light"}
               style={styles.input}
               value={payAmount}
               onChangeText={setPayAmount}
@@ -385,67 +403,69 @@ export default function ScheduleScreen({ user, schedules, onSchedules, onRecords
   );
 }
 
-const styles = StyleSheet.create({
-  card: { backgroundColor: CARD, borderRadius: 12, padding: 16, marginTop: 14, borderWidth: 1, borderColor: LINE },
+function makeStyles(c) {
+  return StyleSheet.create({
+  card: { backgroundColor: c.card, borderRadius: 12, padding: 16, marginTop: 14, borderWidth: 1, borderColor: c.line },
   cardLate: { borderColor: CRIMSON, borderWidth: 2 },
-  cardTitle: { fontSize: 22, fontWeight: "bold", color: SLATE },
-  label: { fontSize: 17, color: MUTED, marginTop: 14, marginBottom: 6 },
+  cardTitle: { fontSize: 22, fontWeight: "bold", color: c.text },
+  label: { fontSize: 17, color: c.muted, marginTop: 14, marginBottom: 6 },
   input: {
-    backgroundColor: CARD, borderRadius: 10, padding: 14, color: SLATE,
-    fontSize: 22, borderWidth: 1, borderColor: LINE,
+    backgroundColor: c.card, borderRadius: 10, padding: 14, color: c.text,
+    fontSize: 22, borderWidth: 1, borderColor: c.line,
   },
   chipRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 4 },
   chip: {
     paddingVertical: 10, paddingHorizontal: 14, borderRadius: 20,
-    borderWidth: 2, borderColor: LINE, backgroundColor: CARD,
+    borderWidth: 2, borderColor: c.line, backgroundColor: c.card,
   },
   chipWide: { flexGrow: 1, alignItems: "center" },
-  chipActive: { backgroundColor: SLATE, borderColor: SLATE },
-  chipText: { fontSize: 16, fontWeight: "bold", color: SLATE },
-  chipTextActive: { color: "white" },
-  bigValue: { fontSize: 24, fontWeight: "bold", color: SLATE },
+  chipActive: { backgroundColor: c.strong, borderColor: c.strong },
+  chipText: { fontSize: 16, fontWeight: "bold", color: c.text },
+  chipTextActive: { color: c.onStrong },
+  bigValue: { fontSize: 24, fontWeight: "bold", color: c.text },
   stepRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 8 },
   step: {
     flexGrow: 1, paddingVertical: 12, borderRadius: 8,
-    backgroundColor: "#F1F5F9", alignItems: "center", minWidth: "22%",
+    backgroundColor: c.subtle, alignItems: "center", minWidth: "22%",
   },
-  stepText: { fontSize: 15, fontWeight: "bold", color: SLATE },
+  stepText: { fontSize: 15, fontWeight: "bold", color: c.text },
   checkRow: { flexDirection: "row", alignItems: "center", marginTop: 18, gap: 12 },
   checkbox: {
-    width: 32, height: 32, borderRadius: 6, borderWidth: 2, borderColor: SLATE,
-    alignItems: "center", justifyContent: "center", backgroundColor: CARD,
+    width: 32, height: 32, borderRadius: 6, borderWidth: 2, borderColor: c.strong,
+    alignItems: "center", justifyContent: "center", backgroundColor: c.card,
   },
   checkboxOn: { backgroundColor: EMERALD, borderColor: EMERALD },
   checkMark: { color: "white", fontSize: 20, fontWeight: "bold" },
-  checkLabel: { fontSize: 19, color: SLATE, fontWeight: "bold" },
-  rule: { fontSize: 15, color: INDIGO, marginTop: 12, backgroundColor: "#EFF6FF", padding: 12, borderRadius: 8 },
+  checkLabel: { fontSize: 19, color: c.text, fontWeight: "bold" },
+  rule: { fontSize: 15, color: c.accent, marginTop: 12, backgroundColor: c.accentSoft, padding: 12, borderRadius: 8 },
   primaryButton: { marginTop: 16, backgroundColor: EMERALD, padding: 16, borderRadius: 10, alignItems: "center" },
   primaryButtonText: { fontSize: 18, fontWeight: "bold", color: "white" },
-  cancel: { fontSize: 16, color: MUTED, fontWeight: "bold", textAlign: "center", marginTop: 14 },
+  cancel: { fontSize: 16, color: c.muted, fontWeight: "bold", textAlign: "center", marginTop: 14 },
   addButton: {
     marginTop: 16, padding: 16, borderRadius: 12, alignItems: "center",
-    borderWidth: 2, borderColor: INDIGO, borderStyle: "dashed", backgroundColor: "#EFF6FF",
+    borderWidth: 2, borderColor: INDIGO, borderStyle: "dashed", backgroundColor: c.accentSoft,
   },
-  addText: { fontSize: 19, fontWeight: "bold", color: INDIGO },
+  addText: { fontSize: 19, fontWeight: "bold", color: c.accent },
   topRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 10 },
-  scheduleTitle: { fontSize: 21, fontWeight: "bold", color: SLATE, flexShrink: 1 },
-  amountIn: { fontSize: 20, fontWeight: "bold", color: EMERALD },
-  amountOut: { fontSize: 20, fontWeight: "bold", color: CRIMSON },
-  dueText: { fontSize: 17, color: SLATE, marginTop: 6 },
-  dueSoon: { fontSize: 17, color: INDIGO, marginTop: 6, fontWeight: "bold" },
-  dueLate: { fontSize: 17, color: CRIMSON, marginTop: 6, fontWeight: "bold" },
-  meta: { fontSize: 14, color: MUTED, marginTop: 4 },
+  scheduleTitle: { fontSize: 21, fontWeight: "bold", color: c.text, flexShrink: 1 },
+  amountIn: { fontSize: 20, fontWeight: "bold", color: c.good },
+  amountOut: { fontSize: 20, fontWeight: "bold", color: c.bad },
+  dueText: { fontSize: 17, color: c.text, marginTop: 6 },
+  dueSoon: { fontSize: 17, color: c.accent, marginTop: 6, fontWeight: "bold" },
+  dueLate: { fontSize: 17, color: c.bad, marginTop: 6, fontWeight: "bold" },
+  meta: { fontSize: 14, color: c.muted, marginTop: 4 },
   actionRow: { flexDirection: "row", gap: 8, marginTop: 14 },
   paidButton: { flex: 2, backgroundColor: EMERALD, paddingVertical: 14, borderRadius: 10, alignItems: "center" },
   paidText: { fontSize: 16, fontWeight: "bold", color: "white" },
   smallButton: {
     flex: 1, paddingVertical: 14, borderRadius: 10, alignItems: "center",
-    borderWidth: 1, borderColor: LINE,
+    borderWidth: 1, borderColor: c.line,
   },
-  smallText: { fontSize: 14, fontWeight: "bold", color: SLATE },
-  deleteText: { fontSize: 14, fontWeight: "bold", color: CRIMSON },
+  smallText: { fontSize: 14, fontWeight: "bold", color: c.text },
+  deleteText: { fontSize: 14, fontWeight: "bold", color: c.bad },
   payBox: { marginTop: 10 },
-  empty: { fontSize: 17, color: MUTED, marginTop: 18 },
-  doneNote: { fontSize: 15, color: MUTED, marginTop: 14 },
-  webNote: { fontSize: 15, color: INDIGO, marginTop: 12, backgroundColor: "#EFF6FF", padding: 12, borderRadius: 8 },
-});
+  empty: { fontSize: 17, color: c.muted, marginTop: 18 },
+  doneNote: { fontSize: 15, color: c.muted, marginTop: 14 },
+  webNote: { fontSize: 15, color: c.accent, marginTop: 12, backgroundColor: c.accentSoft, padding: 12, borderRadius: 8 },
+  });
+}
