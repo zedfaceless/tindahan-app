@@ -1037,9 +1037,11 @@ function Tracker({ user }) {
             <TouchableOpacity style={styles.statementButton} onPress={requestStatement} disabled={busy}>
               <Text style={styles.statementButtonText}>REQUEST MY STATEMENT</Text>
             </TouchableOpacity>
-            <TouchableOpacity onPress={() => openScreen("account")}>
-              <Text style={styles.statementLink}>Premium gets up to 6 months, instantly</Text>
-            </TouchableOpacity>
+            {!PLAY_BUILD && (
+              <TouchableOpacity onPress={() => openScreen("account")}>
+                <Text style={styles.statementLink}>Premium gets up to 6 months, instantly</Text>
+              </TouchableOpacity>
+            )}
           </View>
         )}
       </View>
